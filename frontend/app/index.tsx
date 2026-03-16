@@ -12,6 +12,7 @@ import {
   SafeAreaView,
   Linking,
   ScrollView,
+  NativeModules,
 } from 'react-native';
 import { WebView, WebViewNavigation } from 'react-native-webview';
 import { Ionicons } from '@expo/vector-icons';
@@ -70,6 +71,15 @@ const WebIframe = ({ url, onLoad }: { url: string; onLoad: () => void }) => {
   );
 };
 
+// User Agents
+const MOBILE_USER_AGENT = Platform.select({
+  android: 'Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36',
+  ios: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1',
+  default: 'Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36'
+});
+
+const DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
+
 export default function ColabApp() {
   const webViewRef = useRef<WebView>(null);
   const [canGoBack, setCanGoBack] = useState(false);
@@ -79,6 +89,10 @@ export default function ColabApp() {
   const [showNavBar, setShowNavBar] = useState(true);
   const [keepAwakeEnabled, setKeepAwakeEnabled] = useState(true);
   const [progress, setProgress] = useState(0);
+  const [desktopMode, setDesktopMode] = useState(false);
+  const [webViewKey, setWebViewKey] = useState(0); // Key to force WebView remount
+  const [batteryOptimizationDisabled, setBatteryOptimizationDisabled] = useState(false);
+  const [showBatteryPrompt, setShowBatteryPrompt] = useState(false);
 
   // Register background task (native only)
   const registerBackgroundTask = async () => {
@@ -99,6 +113,45 @@ export default function ColabApp() {
     }
   };
 
+  // Open battery optimization settings (Android only)
+  const openBatteryOptimizationSettings = async () => {
+    if (Platform.OS !== 'android') return;
+    
+    try {
+      // Open app settings where user can disable battery optimization
+      await Linking.openSettings();
+      setBatteryOptimizationDisabled(true);
+      setShowBatteryPrompt(false);
+    } catch (error) {
+      console.log('Could not open settings:', error);
+      Alert.alert(
+        'Open Settings Manually',
+        'Please go to Settings > Apps > Colab Mobile > Battery > Unrestricted to allow background activity.'
+      );
+    }
+  };
+
+  // Show battery optimization prompt on Android
+  const showBatteryOptimizationPrompt = () => {
+    if (Platform.OS !== 'android') return;
+    
+    Alert.alert(
+      'Keep App Running in Background',
+      'To prevent Android from stopping Colab when minimized:\n\n1. Tap "Open Settings"\n2. Go to "Battery"\n3. Select "Unrestricted"\n\nThis keeps your notebooks running!',
+      [
+        {
+          text: 'Later',
+          style: 'cancel',
+          onPress: () => setShowBatteryPrompt(false),
+        },
+        {
+          text: 'Open Settings',
+          onPress: openBatteryOptimizationSettings,
+        },
+      ]
+    );
+  };
+
   // Setup keep awake and background tasks
   useEffect(() => {
     // Keep screen awake to prevent session timeout (native only)
@@ -109,6 +162,14 @@ export default function ColabApp() {
     // Register background task (native only)
     if (Platform.OS !== 'web') {
       registerBackgroundTask();
+    }
+
+    // Show battery optimization prompt on Android after a short delay
+    if (Platform.OS === 'android' && !batteryOptimizationDisabled) {
+      const timer = setTimeout(() => {
+        showBatteryOptimizationPrompt();
+      }, 3000); // Show after 3 seconds
+      return () => clearTimeout(timer);
     }
 
     return () => {
@@ -185,14 +246,35 @@ export default function ColabApp() {
     setKeepAwakeEnabled(!keepAwakeEnabled);
   };
 
+  // Toggle Desktop Mode
+  const toggleDesktopMode = () => {
+    setDesktopMode(!desktopMode);
+    // Force WebView to reload with new user agent
+    setWebViewKey(prev => prev + 1);
+    Alert.alert(
+      desktopMode ? 'Mobile Mode' : 'Desktop Mode',
+      desktopMode 
+        ? 'Switching to mobile view. Page will reload.' 
+        : 'Switching to desktop view for full Colab experience. Page will reload.'
+    );
+  };
+
+  // Get current user agent based on mode
+  const currentUserAgent = desktopMode ? DESKTOP_USER_AGENT : MOBILE_USER_AGENT;
+
   // JavaScript to inject for better Colab experience
   const injectedJavaScript = `
     (function() {
-      // Viewport meta tag for mobile
-      var meta = document.createElement('meta');
-      meta.name = 'viewport';
-      meta.content = 'width=device-width, initial-scale=1.0, maximum-scale=3.0, user-scalable=yes';
-      document.getElementsByTagName('head')[0].appendChild(meta);
+      // Viewport meta tag - adjust based on mode
+      var meta = document.querySelector('meta[name="viewport"]');
+      if (!meta) {
+        meta = document.createElement('meta');
+        meta.name = 'viewport';
+        document.getElementsByTagName('head')[0].appendChild(meta);
+      }
+      meta.content = ${desktopMode} 
+        ? 'width=1200, initial-scale=0.5, maximum-scale=3.0, user-scalable=yes'
+        : 'width=device-width, initial-scale=1.0, maximum-scale=3.0, user-scalable=yes';
       
       // Keep session alive by periodic activity
       setInterval(function() {
@@ -214,13 +296,6 @@ export default function ColabApp() {
       true;
     })();
   `;
-
-  // Custom User Agent - use mobile Chrome for best compatibility
-  const customUserAgent = Platform.select({
-    android: 'Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36',
-    ios: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1',
-    default: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
-  });
 
   // Show web fallback
   if (Platform.OS === 'web') {
@@ -251,6 +326,10 @@ export default function ColabApp() {
             <View style={styles.featureItem}>
               <Ionicons name="checkmark-circle" size={24} color="#4CAF50" />
               <Text style={styles.featureText}>Google login supported</Text>
+            </View>
+            <View style={styles.featureItem}>
+              <Ionicons name="checkmark-circle" size={24} color="#4CAF50" />
+              <Text style={styles.featureText}>Desktop Mode - full desktop view</Text>
             </View>
             <View style={styles.featureItem}>
               <Ionicons name="checkmark-circle" size={24} color="#4CAF50" />
@@ -299,6 +378,14 @@ export default function ColabApp() {
           <Text style={styles.headerTitle}>Colab</Text>
         </View>
         <View style={styles.headerRight}>
+          {Platform.OS === 'android' && (
+            <TouchableOpacity 
+              style={styles.batteryBtn} 
+              onPress={showBatteryOptimizationPrompt}
+            >
+              <Ionicons name="battery-charging" size={18} color="#4CAF50" />
+            </TouchableOpacity>
+          )}
           <TouchableOpacity 
             style={[styles.keepAwakeBtn, keepAwakeEnabled && styles.keepAwakeActive]} 
             onPress={toggleKeepAwake}
@@ -325,6 +412,7 @@ export default function ColabApp() {
       {/* WebView */}
       <View style={styles.webViewContainer}>
         <WebView
+          key={webViewKey}
           ref={webViewRef}
           source={{ uri: COLAB_URL }}
           style={styles.webView}
@@ -333,7 +421,7 @@ export default function ColabApp() {
           onLoadEnd={() => setIsLoading(false)}
           onLoadProgress={({ nativeEvent }) => setProgress(nativeEvent.progress)}
           injectedJavaScript={injectedJavaScript}
-          userAgent={customUserAgent}
+          userAgent={currentUserAgent}
           javaScriptEnabled={true}
           domStorageEnabled={true}
           startInLoadingState={true}
@@ -416,6 +504,13 @@ export default function ColabApp() {
           </TouchableOpacity>
 
           <TouchableOpacity 
+            style={[styles.navButton, desktopMode && styles.navButtonActive]} 
+            onPress={toggleDesktopMode}
+          >
+            <Ionicons name={desktopMode ? "desktop" : "phone-portrait"} size={22} color={desktopMode ? "#F9AB00" : "#fff"} />
+          </TouchableOpacity>
+
+          <TouchableOpacity 
             style={styles.navButton} 
             onPress={() => setShowNavBar(false)}
           >
@@ -473,6 +568,15 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
     borderRadius: 16,
     backgroundColor: '#2d2d44',
+  },
+  batteryBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(76, 175, 80, 0.2)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 8,
   },
   keepAwakeActive: {
     backgroundColor: 'rgba(76, 175, 80, 0.2)',
@@ -542,6 +646,11 @@ const styles = StyleSheet.create({
   },
   navButtonDisabled: {
     backgroundColor: '#1f1f30',
+  },
+  navButtonActive: {
+    backgroundColor: 'rgba(249, 171, 0, 0.3)',
+    borderWidth: 1,
+    borderColor: '#F9AB00',
   },
   showNavButton: {
     position: 'absolute',
