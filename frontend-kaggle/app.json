@@ -7,7 +7,7 @@
     "icon": "./assets/images/icon.png",
     "scheme": "kagglemobile",
     "userInterfaceStyle": "automatic",
-    "newArchEnabled": true,
+    "newArchEnabled": false,
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.kaggle.mobile",
@@ -36,8 +36,7 @@
       "favicon": "./assets/images/icon.png"
     },
     "plugins": [
-      "expo-router",
-      ["expo-background-fetch", { "startOnBoot": true, "stopOnTerminate": false }]
+      "expo-router"
     ],
     "experiments": { "typedRoutes": true }
   }

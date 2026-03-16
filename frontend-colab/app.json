@@ -7,7 +7,7 @@
     "icon": "./assets/images/icon.png",
     "scheme": "colabmobile",
     "userInterfaceStyle": "automatic",
-    "newArchEnabled": true,
+    "newArchEnabled": false,
     "extra": {
       "eas": {
         "projectId": "8049e41b-d6fc-4538-ae80-d56876d8f948"
@@ -41,8 +41,7 @@
       "favicon": "./assets/images/icon.png"
     },
     "plugins": [
-      "expo-router",
-      ["expo-background-fetch", { "startOnBoot": true, "stopOnTerminate": false }]
+      "expo-router"
     ],
     "experiments": { "typedRoutes": true }
   }
