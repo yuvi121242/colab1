@@ -12,7 +12,7 @@ import {
   SafeAreaView,
   Linking,
   ScrollView,
-  NativeModules,
+  Image,
 } from 'react-native';
 import { WebView, WebViewNavigation } from 'react-native-webview';
 import { Ionicons } from '@expo/vector-icons';
@@ -31,14 +31,31 @@ if (Platform.OS !== 'web') {
   deactivateKeepAwake = keepAwake.deactivateKeepAwake;
 }
 
-const KAGGLE_URL = 'https://www.kaggle.com/';
-const BACKGROUND_FETCH_TASK = 'kaggle-keep-alive-task';
+// App configurations
+const APPS = {
+  colab: {
+    name: 'Google Colab',
+    url: 'https://colab.research.google.com/',
+    color: '#F9AB00',
+    icon: 'code-working',
+    description: 'Jupyter Notebooks in the Cloud',
+  },
+  kaggle: {
+    name: 'Kaggle',
+    url: 'https://www.kaggle.com/',
+    color: '#20BEFF',
+    icon: 'trophy',
+    description: 'Data Science & ML Competitions',
+  },
+};
+
+const BACKGROUND_FETCH_TASK = 'app-keep-alive-task';
 
 // Define the background task (only on native)
 if (Platform.OS !== 'web' && TaskManager) {
   TaskManager.defineTask(BACKGROUND_FETCH_TASK, async () => {
     try {
-      console.log('[Background] Keeping Colab session alive...');
+      console.log('[Background] Keeping session alive...');
       return BackgroundFetch.BackgroundFetchResult.NewData;
     } catch (error) {
       console.error('[Background] Error:', error);
@@ -46,30 +63,6 @@ if (Platform.OS !== 'web' && TaskManager) {
     }
   });
 }
-
-// Web iframe component for web platform
-const WebIframe = ({ url, onLoad }: { url: string; onLoad: () => void }) => {
-  if (Platform.OS !== 'web') return null;
-  
-  return (
-    <View style={styles.iframeContainer}>
-      <Text style={styles.webNotice}>
-        WebView is not supported on web browsers. Please use the Expo Go app on your Android/iOS device for the full experience.
-      </Text>
-      <TouchableOpacity 
-        style={styles.openBrowserBtn}
-        onPress={() => Linking.openURL(url)}
-      >
-        <Ionicons name="open-outline" size={20} color="#fff" />
-        <Text style={styles.openBrowserText}>Open Colab in Browser</Text>
-      </TouchableOpacity>
-      <View style={styles.qrInfo}>
-        <Ionicons name="qr-code" size={48} color="#F9AB00" />
-        <Text style={styles.qrText}>Scan the QR code with Expo Go app to use this app on your phone</Text>
-      </View>
-    </View>
-  );
-};
 
 // User Agents
 const MOBILE_USER_AGENT = Platform.select({
@@ -80,19 +73,102 @@ const MOBILE_USER_AGENT = Platform.select({
 
 const DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
 
-export default function ColabApp() {
+type AppType = 'colab' | 'kaggle';
+
+export default function MainApp() {
+  const [selectedApp, setSelectedApp] = useState<AppType | null>(null);
+  
+  if (!selectedApp) {
+    return <AppSelector onSelect={setSelectedApp} />;
+  }
+  
+  return <WebViewApp appType={selectedApp} onBack={() => setSelectedApp(null)} />;
+}
+
+// App Selector Screen
+function AppSelector({ onSelect }: { onSelect: (app: AppType) => void }) {
+  return (
+    <SafeAreaView style={styles.selectorContainer}>
+      <StatusBar barStyle="light-content" backgroundColor="#1a1a2e" />
+      
+      <View style={styles.selectorHeader}>
+        <Text style={styles.selectorTitle}>Choose Your App</Text>
+        <Text style={styles.selectorSubtitle}>Select a platform to continue</Text>
+      </View>
+      
+      <View style={styles.appCards}>
+        {/* Colab Card */}
+        <TouchableOpacity 
+          style={[styles.appCard, { borderColor: APPS.colab.color }]}
+          onPress={() => onSelect('colab')}
+        >
+          <View style={[styles.appIconContainer, { backgroundColor: APPS.colab.color + '20' }]}>
+            <Image 
+              source={require('../assets/images/colab_logo.png')} 
+              style={styles.appLogo}
+              resizeMode="contain"
+            />
+          </View>
+          <Text style={styles.appCardTitle}>{APPS.colab.name}</Text>
+          <Text style={styles.appCardDesc}>{APPS.colab.description}</Text>
+          <View style={[styles.openButton, { backgroundColor: APPS.colab.color }]}>
+            <Text style={styles.openButtonText}>Open</Text>
+            <Ionicons name="arrow-forward" size={18} color="#fff" />
+          </View>
+        </TouchableOpacity>
+        
+        {/* Kaggle Card */}
+        <TouchableOpacity 
+          style={[styles.appCard, { borderColor: APPS.kaggle.color }]}
+          onPress={() => onSelect('kaggle')}
+        >
+          <View style={[styles.appIconContainer, { backgroundColor: APPS.kaggle.color + '20' }]}>
+            <Ionicons name="trophy" size={48} color={APPS.kaggle.color} />
+          </View>
+          <Text style={styles.appCardTitle}>{APPS.kaggle.name}</Text>
+          <Text style={styles.appCardDesc}>{APPS.kaggle.description}</Text>
+          <View style={[styles.openButton, { backgroundColor: APPS.kaggle.color }]}>
+            <Text style={styles.openButtonText}>Open</Text>
+            <Ionicons name="arrow-forward" size={18} color="#fff" />
+          </View>
+        </TouchableOpacity>
+      </View>
+      
+      <View style={styles.featuresBox}>
+        <Text style={styles.featuresTitle}>Features</Text>
+        <View style={styles.featureRow}>
+          <Ionicons name="checkmark-circle" size={20} color="#4CAF50" />
+          <Text style={styles.featureText}>Full website experience</Text>
+        </View>
+        <View style={styles.featureRow}>
+          <Ionicons name="checkmark-circle" size={20} color="#4CAF50" />
+          <Text style={styles.featureText}>Google login supported</Text>
+        </View>
+        <View style={styles.featureRow}>
+          <Ionicons name="checkmark-circle" size={20} color="#4CAF50" />
+          <Text style={styles.featureText}>Desktop mode toggle</Text>
+        </View>
+        <View style={styles.featureRow}>
+          <Ionicons name="checkmark-circle" size={20} color="#4CAF50" />
+          <Text style={styles.featureText}>Background keep-alive</Text>
+        </View>
+      </View>
+    </SafeAreaView>
+  );
+}
+
+// WebView App Component
+function WebViewApp({ appType, onBack }: { appType: AppType; onBack: () => void }) {
+  const app = APPS[appType];
   const webViewRef = useRef<WebView>(null);
   const [canGoBack, setCanGoBack] = useState(false);
   const [canGoForward, setCanGoForward] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
-  const [currentUrl, setCurrentUrl] = useState(KAGGLE_URL);
   const [showNavBar, setShowNavBar] = useState(true);
   const [keepAwakeEnabled, setKeepAwakeEnabled] = useState(true);
   const [progress, setProgress] = useState(0);
   const [desktopMode, setDesktopMode] = useState(false);
-  const [webViewKey, setWebViewKey] = useState(0); // Key to force WebView remount
-  const [batteryOptimizationDisabled, setBatteryOptimizationDisabled] = useState(false);
-  const [showBatteryPrompt, setShowBatteryPrompt] = useState(false);
+  const [webViewKey, setWebViewKey] = useState(0);
 
   // Register background task (native only)
   const registerBackgroundTask = async () => {
@@ -102,84 +178,50 @@ export default function ColabApp() {
       const status = await BackgroundFetch.getStatusAsync();
       if (status === BackgroundFetch.BackgroundFetchStatus.Available) {
         await BackgroundFetch.registerTaskAsync(BACKGROUND_FETCH_TASK, {
-          minimumInterval: 15 * 60, // 15 minutes
+          minimumInterval: 15 * 60,
           stopOnTerminate: false,
           startOnBoot: true,
         });
-        console.log('[Background] Task registered successfully');
       }
     } catch (error) {
       console.log('[Background] Task registration failed:', error);
     }
   };
 
-  // Open battery optimization settings (Android only)
-  const openBatteryOptimizationSettings = async () => {
-    if (Platform.OS !== 'android') return;
-    
-    try {
-      // Open app settings where user can disable battery optimization
-      await Linking.openSettings();
-      setBatteryOptimizationDisabled(true);
-      setShowBatteryPrompt(false);
-    } catch (error) {
-      console.log('Could not open settings:', error);
-      Alert.alert(
-        'Open Settings Manually',
-        'Please go to Settings > Apps > Colab Mobile > Battery > Unrestricted to allow background activity.'
-      );
-    }
-  };
-
-  // Show battery optimization prompt on Android
-  const showBatteryOptimizationPrompt = () => {
+  // Open battery optimization settings
+  const openBatterySettings = async () => {
     if (Platform.OS !== 'android') return;
     
     Alert.alert(
-      'Keep App Running in Background',
-      'To prevent Android from stopping Colab when minimized:\n\n1. Tap "Open Settings"\n2. Go to "Battery"\n3. Select "Unrestricted"\n\nThis keeps your notebooks running!',
+      'Keep App Running',
+      'To prevent Android from stopping the app:\n\n1. Tap "Open Settings"\n2. Go to "Battery"\n3. Select "Unrestricted"',
       [
-        {
-          text: 'Later',
-          style: 'cancel',
-          onPress: () => setShowBatteryPrompt(false),
-        },
-        {
-          text: 'Open Settings',
-          onPress: openBatteryOptimizationSettings,
-        },
+        { text: 'Later', style: 'cancel' },
+        { text: 'Open Settings', onPress: () => Linking.openSettings() },
       ]
     );
   };
 
-  // Setup keep awake and background tasks
   useEffect(() => {
-    // Keep screen awake to prevent session timeout (native only)
     if (Platform.OS !== 'web' && keepAwakeEnabled && activateKeepAwakeAsync) {
-      activateKeepAwakeAsync('colab-session');
+      activateKeepAwakeAsync('app-session');
     }
     
-    // Register background task (native only)
     if (Platform.OS !== 'web') {
       registerBackgroundTask();
     }
 
-    // Show battery optimization prompt on Android after a short delay
-    if (Platform.OS === 'android' && !batteryOptimizationDisabled) {
-      const timer = setTimeout(() => {
-        showBatteryOptimizationPrompt();
-      }, 3000); // Show after 3 seconds
-      return () => clearTimeout(timer);
+    if (Platform.OS === 'android') {
+      setTimeout(openBatterySettings, 3000);
     }
 
     return () => {
       if (Platform.OS !== 'web' && deactivateKeepAwake) {
-        deactivateKeepAwake('colab-session');
+        deactivateKeepAwake('app-session');
       }
     };
   }, [keepAwakeEnabled]);
 
-  // Handle Android back button
   useEffect(() => {
     if (Platform.OS !== 'android') return;
     
@@ -197,75 +239,40 @@ export default function ColabApp() {
   const handleNavigationStateChange = (navState: WebViewNavigation) => {
     setCanGoBack(navState.canGoBack);
     setCanGoForward(navState.canGoForward);
-    setCurrentUrl(navState.url);
   };
 
-  const goBack = () => {
-    if (webViewRef.current && canGoBack) {
-      webViewRef.current.goBack();
-    }
-  };
-
-  const goForward = () => {
-    if (webViewRef.current && canGoForward) {
-      webViewRef.current.goForward();
-    }
-  };
-
-  const reload = () => {
-    if (webViewRef.current) {
-      webViewRef.current.reload();
-    }
-  };
-
-  const goHome = () => {
-    if (webViewRef.current) {
-      webViewRef.current.injectJavaScript(`window.location.href = '${KAGGLE_URL}'; true;`);
-    }
-  };
+  const goBack = () => webViewRef.current?.goBack();
+  const goForward = () => webViewRef.current?.goForward();
+  const reload = () => webViewRef.current?.reload();
+  const goHome = () => webViewRef.current?.injectJavaScript(`window.location.href = '${app.url}'; true;`);
 
   const toggleKeepAwake = () => {
     if (Platform.OS === 'web') {
-      Alert.alert('Not Available', 'Keep Awake feature is only available on Android/iOS devices.');
+      Alert.alert('Not Available', 'Keep Awake is only available on mobile devices.');
       return;
     }
     
-    if (keepAwakeEnabled) {
-      if (deactivateKeepAwake) deactivateKeepAwake('colab-session');
-      Alert.alert(
-        'Keep Awake Disabled',
-        'Screen may turn off during long operations. Notebooks may timeout.'
-      );
-    } else {
-      if (activateKeepAwakeAsync) activateKeepAwakeAsync('colab-session');
-      Alert.alert(
-        'Keep Awake Enabled',
-        'Screen will stay on to keep your Colab session active.'
-      );
+    if (keepAwakeEnabled && deactivateKeepAwake) {
+      deactivateKeepAwake('app-session');
+    } else if (activateKeepAwakeAsync) {
+      activateKeepAwakeAsync('app-session');
     }
     setKeepAwakeEnabled(!keepAwakeEnabled);
   };
 
-  // Toggle Desktop Mode
   const toggleDesktopMode = () => {
     setDesktopMode(!desktopMode);
-    // Force WebView to reload with new user agent
     setWebViewKey(prev => prev + 1);
     Alert.alert(
       desktopMode ? 'Mobile Mode' : 'Desktop Mode',
-      desktopMode 
-        ? 'Switching to mobile view. Page will reload.' 
-        : 'Switching to desktop view for full Colab experience. Page will reload.'
+      'Page will reload with new view.'
     );
   };
 
-  // Get current user agent based on mode
   const currentUserAgent = desktopMode ? DESKTOP_USER_AGENT : MOBILE_USER_AGENT;
 
-  // JavaScript to inject for better Colab experience
   const injectedJavaScript = `
     (function() {
-      // Viewport meta tag - adjust based on mode
       var meta = document.querySelector('meta[name="viewport"]');
       if (!meta) {
         meta = document.createElement('meta');
@@ -276,9 +283,7 @@ export default function ColabApp() {
         ? 'width=1200, initial-scale=0.5, maximum-scale=3.0, user-scalable=yes'
         : 'width=device-width, initial-scale=1.0, maximum-scale=3.0, user-scalable=yes';
       
-      // Keep session alive by periodic activity
       setInterval(function() {
-        // Simulate mouse movement to prevent session timeout
         var event = new MouseEvent('mousemove', {
           'view': window,
           'bubbles': true,
@@ -287,80 +292,41 @@ export default function ColabApp() {
           'clientY': Math.random() * 100
         });
         document.dispatchEvent(event);
-        console.log('[ColabApp] Keeping session alive...');
-      }, 240000); // Every 4 minutes
+      }, 240000);
       
-      // Prevent the page from prompting to leave
       window.onbeforeunload = null;
-      
       true;
     })();
   `;
 
-  // Show web fallback
+  // Web fallback
   if (Platform.OS === 'web') {
     return (
       <SafeAreaView style={styles.container}>
         <StatusBar barStyle="light-content" backgroundColor="#1a1a2e" />
-        
-        {/* Header */}
         <View style={styles.header}>
+          <TouchableOpacity onPress={onBack} style={styles.backButton}>
+            <Ionicons name="arrow-back" size={24} color="#fff" />
+          </TouchableOpacity>
           <View style={styles.headerLeft}>
-            <Ionicons name="trophy" size={24} color="#20BEFF" />
-            <Text style={styles.headerTitle}>Kaggle Mobile</Text>
+            <Ionicons name={app.icon as any} size={24} color={app.color} />
+            <Text style={styles.headerTitle}>{app.name}</Text>
           </View>
         </View>
-
         <ScrollView style={styles.webFallbackContainer} contentContainerStyle={styles.webFallbackContent}>
-          <View style={styles.appIcon}>
-            <Ionicons name="analytics" size={64} color="#20BEFF" />
-          </View>
-          <Text style={styles.appTitle}>Kaggle Mobile</Text>
-          <Text style={styles.appSubtitle}>Data Science & ML Competitions</Text>
-          
-          <View style={styles.featureList}>
-            <View style={styles.featureItem}>
-              <Ionicons name="checkmark-circle" size={24} color="#4CAF50" />
-              <Text style={styles.featureText}>Full Kaggle experience</Text>
-            </View>
-            <View style={styles.featureItem}>
-              <Ionicons name="checkmark-circle" size={24} color="#4CAF50" />
-              <Text style={styles.featureText}>Google login supported</Text>
-            </View>
-            <View style={styles.featureItem}>
-              <Ionicons name="checkmark-circle" size={24} color="#4CAF50" />
-              <Text style={styles.featureText}>Desktop Mode - full desktop view</Text>
-            </View>
-            <View style={styles.featureItem}>
-              <Ionicons name="checkmark-circle" size={24} color="#4CAF50" />
-              <Text style={styles.featureText}>Keep Awake - prevents session timeout</Text>
-            </View>
-            <View style={styles.featureItem}>
-              <Ionicons name="checkmark-circle" size={24} color="#4CAF50" />
-              <Text style={styles.featureText}>Background task keeps app alive</Text>
-            </View>
-            <View style={styles.featureItem}>
-              <Ionicons name="checkmark-circle" size={24} color="#4CAF50" />
-              <Text style={styles.featureText}>Native navigation controls</Text>
-            </View>
-          </View>
-
-          <View style={styles.instructionBox}>
-            <Ionicons name="phone-portrait-outline" size={32} color="#20BEFF" />
-            <Text style={styles.instructionTitle}>How to use on Mobile</Text>
-            <Text style={styles.instructionText}>
-              1. Download "Expo Go" app from Play Store or App Store{'\n'}
-              2. Scan the QR code shown in the terminal{'\n'}
-              3. Enjoy full Kaggle experience on your phone!
-            </Text>
-          </View>
-
+          <Ionicons name={app.icon as any} size={80} color={app.color} />
+          <Text style={styles.appTitle}>{app.name} Mobile</Text>
+          <Text style={styles.appSubtitle}>{app.description}</Text>
+          <Text style={styles.webNotice}>
+            WebView only works on Android/iOS devices.{'\n'}
+            Use Expo Go app to test on your phone!
+          </Text>
           <TouchableOpacity 
-            style={styles.openBrowserBtn}
-            onPress={() => Linking.openURL(KAGGLE_URL)}
+            style={[styles.openBrowserBtn, { backgroundColor: app.color }]}
+            onPress={() => Linking.openURL(app.url)}
           >
             <Ionicons name="open-outline" size={20} color="#fff" />
-            <Text style={styles.openBrowserText}>Open Kaggle in Browser</Text>
+            <Text style={styles.openBrowserText}>Open in Browser</Text>
           </TouchableOpacity>
         </ScrollView>
       </SafeAreaView>
@@ -373,16 +339,16 @@ export default function ColabApp() {
       
       {/* Header */}
       <View style={styles.header}>
+        <TouchableOpacity onPress={onBack} style={styles.backButton}>
+          <Ionicons name="apps" size={22} color="#fff" />
+        </TouchableOpacity>
         <View style={styles.headerLeft}>
-          <Ionicons name="trophy" size={24} color="#20BEFF" />
-          <Text style={styles.headerTitle}>Kaggle</Text>
+          <Ionicons name={app.icon as any} size={24} color={app.color} />
+          <Text style={styles.headerTitle}>{app.name}</Text>
         </View>
         <View style={styles.headerRight}>
           {Platform.OS === 'android' && (
-            <TouchableOpacity 
-              style={styles.batteryBtn} 
-              onPress={showBatteryOptimizationPrompt}
-            >
+            <TouchableOpacity style={styles.batteryBtn} onPress={openBatterySettings}>
               <Ionicons name="battery-charging" size={18} color="#4CAF50" />
             </TouchableOpacity>
           )}
@@ -405,7 +371,7 @@ export default function ColabApp() {
       {/* Progress Bar */}
       {isLoading && (
         <View style={styles.progressContainer}>
-          <View style={[styles.progressBar, { width: `${progress * 100}%` }]} />
+          <View style={[styles.progressBar, { width: `${progress * 100}%`, backgroundColor: app.color }]} />
         </View>
       )}
 
@@ -414,7 +380,7 @@ export default function ColabApp() {
         <WebView
           key={webViewKey}
           ref={webViewRef}
-          source={{ uri: KAGGLE_URL }}
+          source={{ uri: app.url }}
           style={styles.webView}
           onNavigationStateChange={handleNavigationStateChange}
           onLoadStart={() => setIsLoading(true)}
@@ -433,44 +399,21 @@ export default function ColabApp() {
           thirdPartyCookiesEnabled={true}
           sharedCookiesEnabled={true}
           cacheEnabled={true}
-          incognito={false}
-          setSupportMultipleWindows={false}
           allowsBackForwardNavigationGestures={true}
           allowFileAccess={true}
-          allowFileAccessFromFileURLs={true}
-          allowUniversalAccessFromFileURLs={true}
-          geolocationEnabled={true}
-          saveFormDataDisabled={false}
-          textZoom={100}
           renderLoading={() => (
             <View style={styles.loadingContainer}>
-              <ActivityIndicator size="large" color="#20BEFF" />
-              <Text style={styles.loadingText}>Loading Kaggle...</Text>
-              <Text style={styles.loadingSubtext}>Sign in with your Google account</Text>
+              <ActivityIndicator size="large" color={app.color} />
+              <Text style={styles.loadingText}>Loading {app.name}...</Text>
             </View>
           )}
-          onError={(syntheticEvent) => {
-            const { nativeEvent } = syntheticEvent;
-            console.warn('WebView error: ', nativeEvent);
-          }}
-          onHttpError={(syntheticEvent) => {
-            const { nativeEvent } = syntheticEvent;
-            console.warn('WebView HTTP error: ', nativeEvent.statusCode);
-          }}
           onShouldStartLoadWithRequest={(request) => {
-            // Allow Kaggle and Google OAuth redirects
-            if (request.url.includes('kaggle.com') || 
-                request.url.includes('accounts.google.com') ||
+            if (request.url.includes('accounts.google.com') || 
                 request.url.includes('googleapis.com') ||
-                request.url.includes('google.com/recaptcha')) {
+                request.url.includes('google.com/recaptcha') ||
+                request.url.includes(appType === 'colab' ? 'colab.research.google.com' : 'kaggle.com') ||
+                request.url.includes('drive.google.com')) {
               return true;
-            }
-            // Open external links in default browser
-            if (!request.url.startsWith('https://www.kaggle') && 
-                !request.url.startsWith('https://kaggle') &&
-                !request.url.startsWith('https://accounts.google')) {
-              Linking.openURL(request.url);
-              return false;
             }
             return true;
           }}
@@ -505,25 +448,22 @@ export default function ColabApp() {
           </TouchableOpacity>
 
           <TouchableOpacity 
-            style={[styles.navButton, desktopMode && styles.navButtonActive]} 
+            style={[styles.navButton, desktopMode && { backgroundColor: app.color + '40', borderWidth: 1, borderColor: app.color }]} 
             onPress={toggleDesktopMode}
           >
-            <Ionicons name={desktopMode ? "desktop" : "phone-portrait"} size={22} color={desktopMode ? "#20BEFF" : "#fff"} />
+            <Ionicons name={desktopMode ? "desktop" : "phone-portrait"} size={22} color={desktopMode ? app.color : "#fff"} />
           </TouchableOpacity>
 
-          <TouchableOpacity 
-            style={styles.navButton} 
-            onPress={() => setShowNavBar(false)}
-          >
+          <TouchableOpacity style={styles.navButton} onPress={() => setShowNavBar(false)}>
             <Ionicons name="eye-off" size={22} color="#fff" />
           </TouchableOpacity>
         </View>
       )}
 
-      {/* Show Nav Button when hidden */}
+      {/* Show Nav Button */}
       {!showNavBar && (
         <TouchableOpacity 
-          style={styles.showNavButton} 
+          style={[styles.showNavButton, { backgroundColor: app.color }]} 
           onPress={() => setShowNavBar(true)}
         >
           <Ionicons name="menu" size={20} color="#fff" />
@@ -534,6 +474,100 @@ export default function ColabApp() {
 }
 
 const styles = StyleSheet.create({
+  // Selector Styles
+  selectorContainer: {
+    flex: 1,
+    backgroundColor: '#1a1a2e',
+  },
+  selectorHeader: {
+    paddingTop: 40,
+    paddingBottom: 20,
+    alignItems: 'center',
+  },
+  selectorTitle: {
+    color: '#fff',
+    fontSize: 28,
+    fontWeight: '700',
+  },
+  selectorSubtitle: {
+    color: '#888',
+    fontSize: 16,
+    marginTop: 8,
+  },
+  appCards: {
+    flexDirection: 'row',
+    paddingHorizontal: 16,
+    gap: 12,
+  },
+  appCard: {
+    flex: 1,
+    backgroundColor: '#2d2d44',
+    borderRadius: 16,
+    padding: 20,
+    alignItems: 'center',
+    borderWidth: 2,
+  },
+  appIconContainer: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  appLogo: {
+    width: 50,
+    height: 50,
+  },
+  appCardTitle: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '700',
+    marginBottom: 4,
+  },
+  appCardDesc: {
+    color: '#888',
+    fontSize: 12,
+    textAlign: 'center',
+    marginBottom: 16,
+  },
+  openButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    borderRadius: 20,
+    gap: 6,
+  },
+  openButtonText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  featuresBox: {
+    margin: 16,
+    backgroundColor: '#2d2d44',
+    borderRadius: 16,
+    padding: 20,
+  },
+  featuresTitle: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '600',
+    marginBottom: 16,
+  },
+  featureRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 12,
+    gap: 10,
+  },
+  featureText: {
+    color: '#ccc',
+    fontSize: 14,
+  },
+  
+  // App Styles
   container: {
     flex: 1,
     backgroundColor: '#1a1a2e',
@@ -542,25 +576,36 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
     backgroundColor: '#1a1a2e',
     borderBottomWidth: 1,
     borderBottomColor: '#2d2d44',
   },
+  backButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#2d2d44',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 8,
+  },
   headerLeft: {
     flexDirection: 'row',
     alignItems: 'center',
+    flex: 1,
   },
   headerTitle: {
     color: '#fff',
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: '700',
     marginLeft: 8,
   },
   headerRight: {
     flexDirection: 'row',
     alignItems: 'center',
+    gap: 8,
   },
   keepAwakeBtn: {
     flexDirection: 'row',
@@ -577,7 +622,6 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(76, 175, 80, 0.2)',
     justifyContent: 'center',
     alignItems: 'center',
-    marginRight: 8,
   },
   keepAwakeActive: {
     backgroundColor: 'rgba(76, 175, 80, 0.2)',
@@ -597,7 +641,6 @@ const styles = StyleSheet.create({
   },
   progressBar: {
     height: '100%',
-    backgroundColor: '#20BEFF',
   },
   webViewContainer: {
     flex: 1,
@@ -622,36 +665,26 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
   },
-  loadingSubtext: {
-    color: '#888',
-    marginTop: 8,
-    fontSize: 14,
-  },
   navBar: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-around',
     paddingVertical: 10,
-    paddingHorizontal: 16,
+    paddingHorizontal: 12,
     backgroundColor: '#1a1a2e',
     borderTopWidth: 1,
     borderTopColor: '#2d2d44',
   },
   navButton: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
+    width: 46,
+    height: 46,
+    borderRadius: 23,
     backgroundColor: '#2d2d44',
     justifyContent: 'center',
     alignItems: 'center',
   },
   navButtonDisabled: {
     backgroundColor: '#1f1f30',
-  },
-  navButtonActive: {
-    backgroundColor: 'rgba(32, 190, 255, 0.3)',
-    borderWidth: 1,
-    borderColor: '#20BEFF',
   },
   showNavButton: {
     position: 'absolute',
@@ -660,35 +693,12 @@ const styles = StyleSheet.create({
     width: 44,
     height: 44,
     borderRadius: 22,
-    backgroundColor: 'rgba(32, 190, 255, 0.9)',
     justifyContent: 'center',
     alignItems: 'center',
     elevation: 5,
-    ...Platform.select({
-      ios: {
-        shadowColor: '#000',
-        shadowOffset: { width: 0, height: 2 },
-        shadowOpacity: 0.25,
-        shadowRadius: 4,
-      },
-      android: {
-        elevation: 5,
-      },
-    }),
   },
-  // Web fallback styles
-  iframeContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 20,
-  },
-  webNotice: {
-    color: '#888',
-    fontSize: 14,
-    textAlign: 'center',
-    marginBottom: 20,
-  },
+  
+  // Web Fallback
   webFallbackContainer: {
     flex: 1,
   },
@@ -696,86 +706,36 @@ const styles = StyleSheet.create({
     padding: 24,
     alignItems: 'center',
   },
-  appIcon: {
-    width: 100,
-    height: 100,
-    borderRadius: 20,
-    backgroundColor: '#2d2d44',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 16,
-  },
   appTitle: {
     color: '#fff',
     fontSize: 28,
     fontWeight: '700',
+    marginTop: 16,
     marginBottom: 8,
   },
   appSubtitle: {
     color: '#888',
     fontSize: 16,
-    marginBottom: 32,
-  },
-  featureList: {
-    width: '100%',
-    maxWidth: 400,
-    marginBottom: 32,
-  },
-  featureItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 16,
-  },
-  featureText: {
-    color: '#fff',
-    fontSize: 16,
-    marginLeft: 12,
-  },
-  instructionBox: {
-    backgroundColor: '#2d2d44',
-    borderRadius: 16,
-    padding: 24,
-    alignItems: 'center',
     marginBottom: 24,
-    width: '100%',
-    maxWidth: 400,
   },
-  instructionTitle: {
-    color: '#fff',
-    fontSize: 18,
-    fontWeight: '600',
-    marginTop: 12,
-    marginBottom: 12,
-  },
-  instructionText: {
-    color: '#aaa',
+  webNotice: {
+    color: '#888',
     fontSize: 14,
-    lineHeight: 24,
     textAlign: 'center',
+    marginBottom: 24,
+    lineHeight: 22,
   },
   openBrowserBtn: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#20BEFF',
     paddingHorizontal: 24,
     paddingVertical: 14,
     borderRadius: 12,
+    gap: 8,
   },
   openBrowserText: {
     color: '#fff',
     fontSize: 16,
     fontWeight: '600',
-    marginLeft: 8,
-  },
-  qrInfo: {
-    alignItems: 'center',
-    marginTop: 40,
-  },
-  qrText: {
-    color: '#888',
-    fontSize: 14,
-    textAlign: 'center',
-    marginTop: 16,
-    maxWidth: 250,
   },
 });

@@ -1,28 +1,28 @@
 {
   "expo": {
-    "name": "Kaggle Mobile",
-    "slug": "kaggle-mobile",
+    "name": "Colab & Kaggle",
+    "slug": "colab-kaggle-mobile",
     "version": "1.0.0",
     "orientation": "default",
     "icon": "./assets/images/icon.png",
-    "scheme": "kagglemobile",
+    "scheme": "colabkaggle",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.kaggle.mobile",
+      "bundleIdentifier": "com.colabkaggle.mobile",
       "infoPlist": {
         "UIBackgroundModes": ["fetch", "processing"],
-        "BGTaskSchedulerPermittedIdentifiers": ["com.kaggle.keepalive"]
+        "BGTaskSchedulerPermittedIdentifiers": ["com.colabkaggle.keepalive"]
       }
     },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
-        "backgroundColor": "#20BEFF"
+        "backgroundColor": "#1a1a2e"
       },
       "edgeToEdgeEnabled": true,
-      "package": "com.kaggle.mobile",
+      "package": "com.colabkaggle.mobile",
       "permissions": [
         "INTERNET",
         "ACCESS_NETWORK_STATE",
@@ -45,7 +45,7 @@
           "image": "./assets/images/splash-icon.png",
           "imageWidth": 200,
           "resizeMode": "contain",
-          "backgroundColor": "#20BEFF"
+          "backgroundColor": "#1a1a2e"
         }
       ],
       [
