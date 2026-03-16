@@ -31,8 +31,8 @@ if (Platform.OS !== 'web') {
   deactivateKeepAwake = keepAwake.deactivateKeepAwake;
 }
 
-const COLAB_URL = 'https://colab.research.google.com/';
-const BACKGROUND_FETCH_TASK = 'colab-keep-alive-task';
+const KAGGLE_URL = 'https://www.kaggle.com/';
+const BACKGROUND_FETCH_TASK = 'kaggle-keep-alive-task';
 
 // Define the background task (only on native)
 if (Platform.OS !== 'web' && TaskManager) {
@@ -85,7 +85,7 @@ export default function ColabApp() {
   const [canGoBack, setCanGoBack] = useState(false);
   const [canGoForward, setCanGoForward] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
-  const [currentUrl, setCurrentUrl] = useState(COLAB_URL);
+  const [currentUrl, setCurrentUrl] = useState(KAGGLE_URL);
   const [showNavBar, setShowNavBar] = useState(true);
   const [keepAwakeEnabled, setKeepAwakeEnabled] = useState(true);
   const [progress, setProgress] = useState(0);
@@ -220,7 +220,7 @@ export default function ColabApp() {
 
   const goHome = () => {
     if (webViewRef.current) {
-      webViewRef.current.injectJavaScript(`window.location.href = '${COLAB_URL}'; true;`);
+      webViewRef.current.injectJavaScript(`window.location.href = '${KAGGLE_URL}'; true;`);
     }
   };
 
@@ -306,22 +306,22 @@ export default function ColabApp() {
         {/* Header */}
         <View style={styles.header}>
           <View style={styles.headerLeft}>
-            <Ionicons name="logo-google" size={24} color="#F9AB00" />
-            <Text style={styles.headerTitle}>Colab Mobile</Text>
+            <Ionicons name="trophy" size={24} color="#20BEFF" />
+            <Text style={styles.headerTitle}>Kaggle Mobile</Text>
           </View>
         </View>
 
         <ScrollView style={styles.webFallbackContainer} contentContainerStyle={styles.webFallbackContent}>
           <View style={styles.appIcon}>
-            <Ionicons name="code-working" size={64} color="#F9AB00" />
+            <Ionicons name="analytics" size={64} color="#20BEFF" />
           </View>
-          <Text style={styles.appTitle}>Google Colab Mobile</Text>
-          <Text style={styles.appSubtitle}>Your pocket-sized Jupyter notebook</Text>
+          <Text style={styles.appTitle}>Kaggle Mobile</Text>
+          <Text style={styles.appSubtitle}>Data Science & ML Competitions</Text>
           
           <View style={styles.featureList}>
             <View style={styles.featureItem}>
               <Ionicons name="checkmark-circle" size={24} color="#4CAF50" />
-              <Text style={styles.featureText}>Full Google Colab experience</Text>
+              <Text style={styles.featureText}>Full Kaggle experience</Text>
             </View>
             <View style={styles.featureItem}>
               <Ionicons name="checkmark-circle" size={24} color="#4CAF50" />
@@ -346,21 +346,21 @@ export default function ColabApp() {
           </View>
 
           <View style={styles.instructionBox}>
-            <Ionicons name="phone-portrait-outline" size={32} color="#F9AB00" />
+            <Ionicons name="phone-portrait-outline" size={32} color="#20BEFF" />
             <Text style={styles.instructionTitle}>How to use on Mobile</Text>
             <Text style={styles.instructionText}>
               1. Download "Expo Go" app from Play Store or App Store{'\n'}
               2. Scan the QR code shown in the terminal{'\n'}
-              3. Enjoy full Colab experience on your phone!
+              3. Enjoy full Kaggle experience on your phone!
             </Text>
           </View>
 
           <TouchableOpacity 
             style={styles.openBrowserBtn}
-            onPress={() => Linking.openURL(COLAB_URL)}
+            onPress={() => Linking.openURL(KAGGLE_URL)}
           >
             <Ionicons name="open-outline" size={20} color="#fff" />
-            <Text style={styles.openBrowserText}>Open Colab in Browser</Text>
+            <Text style={styles.openBrowserText}>Open Kaggle in Browser</Text>
           </TouchableOpacity>
         </ScrollView>
       </SafeAreaView>
@@ -374,8 +374,8 @@ export default function ColabApp() {
       {/* Header */}
       <View style={styles.header}>
         <View style={styles.headerLeft}>
-          <Ionicons name="logo-google" size={24} color="#F9AB00" />
-          <Text style={styles.headerTitle}>Colab</Text>
+          <Ionicons name="trophy" size={24} color="#20BEFF" />
+          <Text style={styles.headerTitle}>Kaggle</Text>
         </View>
         <View style={styles.headerRight}>
           {Platform.OS === 'android' && (
@@ -414,7 +414,7 @@ export default function ColabApp() {
         <WebView
           key={webViewKey}
           ref={webViewRef}
-          source={{ uri: COLAB_URL }}
+          source={{ uri: KAGGLE_URL }}
           style={styles.webView}
           onNavigationStateChange={handleNavigationStateChange}
           onLoadStart={() => setIsLoading(true)}
@@ -444,8 +444,8 @@ export default function ColabApp() {
           textZoom={100}
           renderLoading={() => (
             <View style={styles.loadingContainer}>
-              <ActivityIndicator size="large" color="#F9AB00" />
-              <Text style={styles.loadingText}>Loading Google Colab...</Text>
+              <ActivityIndicator size="large" color="#20BEFF" />
+              <Text style={styles.loadingText}>Loading Kaggle...</Text>
               <Text style={styles.loadingSubtext}>Sign in with your Google account</Text>
             </View>
           )}
@@ -458,15 +458,16 @@ export default function ColabApp() {
             console.warn('WebView HTTP error: ', nativeEvent.statusCode);
           }}
           onShouldStartLoadWithRequest={(request) => {
-            // Allow Google OAuth redirects
-            if (request.url.includes('accounts.google.com') || 
-                request.url.includes('colab.research.google.com') ||
-                request.url.includes('drive.google.com') ||
-                request.url.includes('googleapis.com')) {
+            // Allow Kaggle and Google OAuth redirects
+            if (request.url.includes('kaggle.com') || 
+                request.url.includes('accounts.google.com') ||
+                request.url.includes('googleapis.com') ||
+                request.url.includes('google.com/recaptcha')) {
               return true;
             }
             // Open external links in default browser
-            if (!request.url.startsWith('https://colab') && 
+            if (!request.url.startsWith('https://www.kaggle') && 
+                !request.url.startsWith('https://kaggle') &&
                 !request.url.startsWith('https://accounts.google')) {
               Linking.openURL(request.url);
               return false;
@@ -507,7 +508,7 @@ export default function ColabApp() {
             style={[styles.navButton, desktopMode && styles.navButtonActive]} 
             onPress={toggleDesktopMode}
           >
-            <Ionicons name={desktopMode ? "desktop" : "phone-portrait"} size={22} color={desktopMode ? "#F9AB00" : "#fff"} />
+            <Ionicons name={desktopMode ? "desktop" : "phone-portrait"} size={22} color={desktopMode ? "#20BEFF" : "#fff"} />
           </TouchableOpacity>
 
           <TouchableOpacity 
@@ -596,7 +597,7 @@ const styles = StyleSheet.create({
   },
   progressBar: {
     height: '100%',
-    backgroundColor: '#F9AB00',
+    backgroundColor: '#20BEFF',
   },
   webViewContainer: {
     flex: 1,
@@ -648,9 +649,9 @@ const styles = StyleSheet.create({
     backgroundColor: '#1f1f30',
   },
   navButtonActive: {
-    backgroundColor: 'rgba(249, 171, 0, 0.3)',
+    backgroundColor: 'rgba(32, 190, 255, 0.3)',
     borderWidth: 1,
-    borderColor: '#F9AB00',
+    borderColor: '#20BEFF',
   },
   showNavButton: {
     position: 'absolute',
@@ -659,7 +660,7 @@ const styles = StyleSheet.create({
     width: 44,
     height: 44,
     borderRadius: 22,
-    backgroundColor: 'rgba(249, 171, 0, 0.9)',
+    backgroundColor: 'rgba(32, 190, 255, 0.9)',
     justifyContent: 'center',
     alignItems: 'center',
     elevation: 5,
@@ -755,7 +756,7 @@ const styles = StyleSheet.create({
   openBrowserBtn: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#F9AB00',
+    backgroundColor: '#20BEFF',
     paddingHorizontal: 24,
     paddingVertical: 14,
     borderRadius: 12,
