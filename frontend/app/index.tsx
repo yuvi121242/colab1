@@ -9,13 +9,14 @@ import {
   Platform,
   StatusBar,
   Alert,
-  SafeAreaView,
   Linking,
   ScrollView,
   Image,
+  useWindowDimensions,
 } from 'react-native';
 import { WebView, WebViewNavigation } from 'react-native-webview';
 import { Ionicons } from '@expo/vector-icons';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 // Only import native-only modules on native platforms
 let TaskManager: any = null;
@@ -87,9 +88,13 @@ export default function MainApp() {
 
 // App Selector Screen
 function AppSelector({ onSelect }: { onSelect: (app: AppType) => void }) {
+  const insets = useSafeAreaInsets();
+  const statusBarHeight = Platform.OS === 'android' ? StatusBar.currentHeight || 24 : 0;
+  const topPadding = Math.max(insets.top, statusBarHeight, 24);
+  
   return (
-    <SafeAreaView style={styles.selectorContainer}>
-      <StatusBar barStyle="light-content" backgroundColor="#1a1a2e" />
+    <View style={[styles.selectorContainer, { paddingTop: topPadding }]}>
+      <StatusBar barStyle="light-content" backgroundColor="#1a1a2e" translucent />
       
       <View style={styles.selectorHeader}>
         <Text style={styles.selectorTitle}>Choose Your App</Text>
@@ -153,13 +158,15 @@ function AppSelector({ onSelect }: { onSelect: (app: AppType) => void }) {
           <Text style={styles.featureText}>Background keep-alive</Text>
         </View>
       </View>
-    </SafeAreaView>
+    </View>
   );
 }
 
 // WebView App Component
 function WebViewApp({ appType, onBack }: { appType: AppType; onBack: () => void }) {
   const app = APPS[appType];
+  const insets = useSafeAreaInsets();
+  const { width, height } = useWindowDimensions();
   const webViewRef = useRef<WebView>(null);
   const [canGoBack, setCanGoBack] = useState(false);
   const [canGoForward, setCanGoForward] = useState(false);
@@ -169,6 +176,11 @@ function WebViewApp({ appType, onBack }: { appType: AppType; onBack: () => void 
   const [progress, setProgress] = useState(0);
   const [desktopMode, setDesktopMode] = useState(false);
   const [webViewKey, setWebViewKey] = useState(0);
+
+  // Calculate dynamic padding
+  const statusBarHeight = Platform.OS === 'android' ? StatusBar.currentHeight || 24 : 0;
+  const topPadding = Math.max(insets.top, statusBarHeight, 24);
+  const bottomPadding = Math.max(insets.bottom, 10);
 
   // Register background task (native only)
   const registerBackgroundTask = async () => {
@@ -302,8 +314,8 @@ function WebViewApp({ appType, onBack }: { appType: AppType; onBack: () => void 
   // Web fallback
   if (Platform.OS === 'web') {
     return (
-      <SafeAreaView style={styles.container}>
-        <StatusBar barStyle="light-content" backgroundColor="#1a1a2e" />
+      <View style={[styles.container, { paddingTop: topPadding }]}>
+        <StatusBar barStyle="light-content" backgroundColor="#1a1a2e" translucent />
         <View style={styles.header}>
           <TouchableOpacity onPress={onBack} style={styles.backButton}>
             <Ionicons name="arrow-back" size={24} color="#fff" />
@@ -329,16 +341,16 @@ function WebViewApp({ appType, onBack }: { appType: AppType; onBack: () => void 
             <Text style={styles.openBrowserText}>Open in Browser</Text>
           </TouchableOpacity>
         </ScrollView>
-      </SafeAreaView>
+      </View>
     );
   }
 
   return (
-    <SafeAreaView style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor="#1a1a2e" />
+    <View style={styles.container}>
+      <StatusBar barStyle="light-content" backgroundColor="#1a1a2e" translucent />
       
-      {/* Header */}
-      <View style={styles.header}>
+      {/* Header with dynamic top padding */}
+      <View style={[styles.header, { paddingTop: topPadding }]}>
         <TouchableOpacity onPress={onBack} style={styles.backButton}>
           <Ionicons name="apps" size={22} color="#fff" />
         </TouchableOpacity>
@@ -420,9 +432,9 @@ function WebViewApp({ appType, onBack }: { appType: AppType; onBack: () => void 
         />
       </View>
 
-      {/* Navigation Bar */}
+      {/* Navigation Bar with dynamic bottom padding */}
       {showNavBar && (
-        <View style={styles.navBar}>
+        <View style={[styles.navBar, { paddingBottom: bottomPadding }]}>
           <TouchableOpacity 
             style={[styles.navButton, !canGoBack && styles.navButtonDisabled]} 
             onPress={goBack}
@@ -463,13 +475,13 @@ function WebViewApp({ appType, onBack }: { appType: AppType; onBack: () => void 
       {/* Show Nav Button */}
       {!showNavBar && (
         <TouchableOpacity 
-          style={[styles.showNavButton, { backgroundColor: app.color }]} 
+          style={[styles.showNavButton, { backgroundColor: app.color, bottom: bottomPadding + 10 }]} 
           onPress={() => setShowNavBar(true)}
         >
           <Ionicons name="menu" size={20} color="#fff" />
         </TouchableOpacity>
       )}
-    </SafeAreaView>
+    </View>
   );
 }
 
@@ -577,7 +589,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 12,
-    paddingVertical: 10,
+    paddingBottom: 10,
     backgroundColor: '#1a1a2e',
     borderBottomWidth: 1,
     borderBottomColor: '#2d2d44',
@@ -669,7 +681,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-around',
-    paddingVertical: 10,
+    paddingTop: 10,
     paddingHorizontal: 12,
     backgroundColor: '#1a1a2e',
     borderTopWidth: 1,
@@ -688,7 +700,6 @@ const styles = StyleSheet.create({
   },
   showNavButton: {
     position: 'absolute',
-    bottom: 20,
     right: 20,
     width: 44,
     height: 44,

@@ -9,12 +9,14 @@ import {
   Platform,
   StatusBar,
   Alert,
-  SafeAreaView,
   Linking,
   ScrollView,
+  Dimensions,
+  useWindowDimensions,
 } from 'react-native';
 import { WebView, WebViewNavigation } from 'react-native-webview';
 import { Ionicons } from '@expo/vector-icons';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 // Only import native-only modules on native platforms
 let TaskManager: any = null;
@@ -58,6 +60,8 @@ const MOBILE_USER_AGENT = Platform.select({
 const DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
 
 export default function ColabApp() {
+  const insets = useSafeAreaInsets();
+  const { width, height } = useWindowDimensions();
   const webViewRef = useRef<WebView>(null);
   const [canGoBack, setCanGoBack] = useState(false);
   const [canGoForward, setCanGoForward] = useState(false);
@@ -67,6 +71,11 @@ export default function ColabApp() {
   const [progress, setProgress] = useState(0);
   const [desktopMode, setDesktopMode] = useState(false);
   const [webViewKey, setWebViewKey] = useState(0);
+
+  // Calculate dynamic padding
+  const statusBarHeight = Platform.OS === 'android' ? StatusBar.currentHeight || 24 : 0;
+  const topPadding = Math.max(insets.top, statusBarHeight, 24);
+  const bottomPadding = Math.max(insets.bottom, 10);
 
   // Register background task
   const registerBackgroundTask = async () => {
@@ -172,8 +181,8 @@ export default function ColabApp() {
   // Web fallback
   if (Platform.OS === 'web') {
     return (
-      <SafeAreaView style={styles.container}>
-        <StatusBar barStyle="light-content" backgroundColor="#1a1a2e" />
+      <View style={[styles.container, { paddingTop: topPadding }]}>
+        <StatusBar barStyle="light-content" backgroundColor="#1a1a2e" translucent />
         <View style={styles.header}>
           <Ionicons name="logo-google" size={24} color={APP_COLOR} />
           <Text style={styles.headerTitle}>{APP_NAME}</Text>
@@ -187,16 +196,16 @@ export default function ColabApp() {
             <Text style={styles.openBtnText}>Open in Browser</Text>
           </TouchableOpacity>
         </ScrollView>
-      </SafeAreaView>
+      </View>
     );
   }
 
   return (
-    <SafeAreaView style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor="#1a1a2e" />
+    <View style={styles.container}>
+      <StatusBar barStyle="light-content" backgroundColor="#1a1a2e" translucent />
       
-      {/* Header */}
-      <View style={styles.header}>
+      {/* Header with dynamic top padding */}
+      <View style={[styles.header, { paddingTop: topPadding }]}>
         <View style={styles.headerLeft}>
           <Ionicons name="logo-google" size={24} color={APP_COLOR} />
           <Text style={styles.headerTitle}>{APP_NAME}</Text>
@@ -254,9 +263,9 @@ export default function ColabApp() {
         />
       </View>
 
-      {/* Navigation Bar */}
+      {/* Navigation Bar with dynamic bottom padding */}
       {showNavBar && (
-        <View style={styles.navBar}>
+        <View style={[styles.navBar, { paddingBottom: bottomPadding }]}>
           <TouchableOpacity style={[styles.navButton, !canGoBack && styles.navButtonDisabled]} onPress={goBack} disabled={!canGoBack}>
             <Ionicons name="chevron-back" size={24} color={canGoBack ? "#fff" : "#555"} />
           </TouchableOpacity>
@@ -279,17 +288,29 @@ export default function ColabApp() {
       )}
 
       {!showNavBar && (
-        <TouchableOpacity style={styles.showNavButton} onPress={() => setShowNavBar(true)}>
+        <TouchableOpacity style={[styles.showNavButton, { bottom: bottomPadding + 10 }]} onPress={() => setShowNavBar(true)}>
           <Ionicons name="menu" size={20} color="#fff" />
         </TouchableOpacity>
       )}
-    </SafeAreaView>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#1a1a2e' },
-  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 12, backgroundColor: '#1a1a2e', borderBottomWidth: 1, borderBottomColor: '#2d2d44' },
+  container: { 
+    flex: 1, 
+    backgroundColor: '#1a1a2e',
+  },
+  header: { 
+    flexDirection: 'row', 
+    alignItems: 'center', 
+    justifyContent: 'space-between', 
+    paddingHorizontal: 16, 
+    paddingBottom: 12,
+    backgroundColor: '#1a1a2e', 
+    borderBottomWidth: 1, 
+    borderBottomColor: '#2d2d44',
+  },
   headerLeft: { flexDirection: 'row', alignItems: 'center' },
   headerTitle: { color: '#fff', fontSize: 20, fontWeight: '700', marginLeft: 8 },
   headerRight: { flexDirection: 'row', alignItems: 'center', gap: 8 },
@@ -304,11 +325,20 @@ const styles = StyleSheet.create({
   webView: { flex: 1 },
   loadingContainer: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: '#1a1a2e', justifyContent: 'center', alignItems: 'center' },
   loadingText: { color: '#fff', marginTop: 12, fontSize: 16, fontWeight: '600' },
-  navBar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around', paddingVertical: 10, paddingHorizontal: 12, backgroundColor: '#1a1a2e', borderTopWidth: 1, borderTopColor: '#2d2d44' },
+  navBar: { 
+    flexDirection: 'row', 
+    alignItems: 'center', 
+    justifyContent: 'space-around', 
+    paddingTop: 10,
+    paddingHorizontal: 12, 
+    backgroundColor: '#1a1a2e', 
+    borderTopWidth: 1, 
+    borderTopColor: '#2d2d44',
+  },
   navButton: { width: 46, height: 46, borderRadius: 23, backgroundColor: '#2d2d44', justifyContent: 'center', alignItems: 'center' },
   navButtonDisabled: { backgroundColor: '#1f1f30' },
   navButtonActive: { backgroundColor: 'rgba(249, 171, 0, 0.3)', borderWidth: 1, borderColor: '#F9AB00' },
-  showNavButton: { position: 'absolute', bottom: 20, right: 20, width: 44, height: 44, borderRadius: 22, backgroundColor: '#F9AB00', justifyContent: 'center', alignItems: 'center', elevation: 5 },
+  showNavButton: { position: 'absolute', right: 20, width: 44, height: 44, borderRadius: 22, backgroundColor: '#F9AB00', justifyContent: 'center', alignItems: 'center', elevation: 5 },
   webFallback: { flex: 1, padding: 24, alignItems: 'center', justifyContent: 'center' },
   appTitle: { color: '#fff', fontSize: 28, fontWeight: '700', marginTop: 16, marginBottom: 8 },
   webNotice: { color: '#888', fontSize: 14, textAlign: 'center', marginBottom: 24 },
