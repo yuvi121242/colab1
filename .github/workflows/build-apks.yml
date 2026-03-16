@@ -1,0 +1,155 @@
+name: Build APKs (Colab + Kaggle)
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build-colab-apk:
+    name: Build Colab Mobile APK
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install dependencies
+        working-directory: frontend-colab
+        run: npm install
+
+      - name: Generate Android project (expo prebuild)
+        working-directory: frontend-colab
+        run: npx expo prebuild --platform android --clean --no-install
+
+      - name: Make Gradlew executable
+        working-directory: frontend-colab/android
+        run: chmod +x gradlew
+
+      - name: Build release APK
+        working-directory: frontend-colab/android
+        run: ./gradlew assembleRelease --no-daemon
+
+      - name: Rename APK with app name
+        run: |
+          mkdir -p dist
+          cp frontend-colab/android/app/build/outputs/apk/release/app-release*.apk \
+             dist/colab-mobile.apk
+
+      - name: Upload Colab APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: colab-mobile-apk
+          path: dist/colab-mobile.apk
+          retention-days: 30
+
+  build-kaggle-apk:
+    name: Build Kaggle Mobile APK
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install dependencies
+        working-directory: frontend-kaggle
+        run: npm install
+
+      - name: Generate Android project (expo prebuild)
+        working-directory: frontend-kaggle
+        run: npx expo prebuild --platform android --clean --no-install
+
+      - name: Make Gradlew executable
+        working-directory: frontend-kaggle/android
+        run: chmod +x gradlew
+
+      - name: Build release APK
+        working-directory: frontend-kaggle/android
+        run: ./gradlew assembleRelease --no-daemon
+
+      - name: Rename APK with app name
+        run: |
+          mkdir -p dist
+          cp frontend-kaggle/android/app/build/outputs/apk/release/app-release*.apk \
+             dist/kaggle-mobile.apk
+
+      - name: Upload Kaggle APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kaggle-mobile-apk
+          path: dist/kaggle-mobile.apk
+          retention-days: 30
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [build-colab-apk, build-kaggle-apk]
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    permissions:
+      contents: write
+    steps:
+      - name: Download Colab APK
+        uses: actions/download-artifact@v4.1.3
+        with:
+          name: colab-mobile-apk
+          path: dist
+
+      - name: Download Kaggle APK
+        uses: actions/download-artifact@v4.1.3
+        with:
+          name: kaggle-mobile-apk
+          path: dist
+
+      - name: Create / update latest release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest-build
+          name: "Latest APK Build"
+          body: |
+            ## 📱 Download APKs
+
+            | App | Download |
+            |-----|----------|
+            | Google Colab Mobile | [colab-mobile.apk](https://github.com/${{ github.repository }}/releases/download/latest-build/colab-mobile.apk) |
+            | Kaggle Mobile | [kaggle-mobile.apk](https://github.com/${{ github.repository }}/releases/download/latest-build/kaggle-mobile.apk) |
+
+            Built automatically from the `main` branch.
+          prerelease: false
+          make_latest: true
+          files: |
+            dist/colab-mobile.apk
+            dist/kaggle-mobile.apk
