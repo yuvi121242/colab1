@@ -1,0 +1,77 @@
+name: Build APKs (Colab + Kaggle)
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: 'EAS build profile'
+        required: false
+        default: 'preview'
+        type: choice
+        options:
+          - preview
+          - production
+
+jobs:
+  build-colab-apk:
+    name: Build Colab Mobile APK
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: frontend-colab/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend-colab
+        run: npm install
+
+      - name: Set up EAS
+        uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Build Colab APK
+        working-directory: frontend-colab
+        run: eas build --platform android --profile ${{ inputs.profile || 'preview' }} --non-interactive --no-wait
+
+  build-kaggle-apk:
+    name: Build Kaggle Mobile APK
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: frontend-kaggle/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend-kaggle
+        run: npm install
+
+      - name: Set up EAS
+        uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Build Kaggle APK
+        working-directory: frontend-kaggle
+        run: eas build --platform android --profile ${{ inputs.profile || 'preview' }} --non-interactive --no-wait

@@ -8,6 +8,12 @@
     "scheme": "kagglemobile",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
+    "owner": "yuvi121242",
+    "extra": {
+      "eas": {
+        "projectId": "auto"
+      }
+    },
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.kaggle.mobile",
