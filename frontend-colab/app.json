@@ -8,10 +8,9 @@
     "scheme": "colabmobile",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
-    "owner": "yuvi121242",
     "extra": {
       "eas": {
-        "projectId": "auto"
+        "projectId": "8049e41b-d6fc-4538-ae80-d56876d8f948"
       }
     },
     "ios": {
