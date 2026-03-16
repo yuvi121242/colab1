@@ -1,0 +1,671 @@
+import React, { useEffect, useRef, useState } from 'react';
+import {
+  View,
+  StyleSheet,
+  ActivityIndicator,
+  Text,
+  TouchableOpacity,
+  BackHandler,
+  Platform,
+  StatusBar,
+  Alert,
+  SafeAreaView,
+  Linking,
+  ScrollView,
+} from 'react-native';
+import { WebView, WebViewNavigation } from 'react-native-webview';
+import { Ionicons } from '@expo/vector-icons';
+
+// Only import native-only modules on native platforms
+let TaskManager: any = null;
+let BackgroundFetch: any = null;
+let activateKeepAwakeAsync: any = null;
+let deactivateKeepAwake: any = null;
+
+if (Platform.OS !== 'web') {
+  TaskManager = require('expo-task-manager');
+  BackgroundFetch = require('expo-background-fetch');
+  const keepAwake = require('expo-keep-awake');
+  activateKeepAwakeAsync = keepAwake.activateKeepAwakeAsync;
+  deactivateKeepAwake = keepAwake.deactivateKeepAwake;
+}
+
+const COLAB_URL = 'https://colab.research.google.com/';
+const BACKGROUND_FETCH_TASK = 'colab-keep-alive-task';
+
+// Define the background task (only on native)
+if (Platform.OS !== 'web' && TaskManager) {
+  TaskManager.defineTask(BACKGROUND_FETCH_TASK, async () => {
+    try {
+      console.log('[Background] Keeping Colab session alive...');
+      return BackgroundFetch.BackgroundFetchResult.NewData;
+    } catch (error) {
+      console.error('[Background] Error:', error);
+      return BackgroundFetch.BackgroundFetchResult.Failed;
+    }
+  });
+}
+
+// Web iframe component for web platform
+const WebIframe = ({ url, onLoad }: { url: string; onLoad: () => void }) => {
+  if (Platform.OS !== 'web') return null;
+  
+  return (
+    <View style={styles.iframeContainer}>
+      <Text style={styles.webNotice}>
+        WebView is not supported on web browsers. Please use the Expo Go app on your Android/iOS device for the full experience.
+      </Text>
+      <TouchableOpacity 
+        style={styles.openBrowserBtn}
+        onPress={() => Linking.openURL(url)}
+      >
+        <Ionicons name="open-outline" size={20} color="#fff" />
+        <Text style={styles.openBrowserText}>Open Colab in Browser</Text>
+      </TouchableOpacity>
+      <View style={styles.qrInfo}>
+        <Ionicons name="qr-code" size={48} color="#F9AB00" />
+        <Text style={styles.qrText}>Scan the QR code with Expo Go app to use this app on your phone</Text>
+      </View>
+    </View>
+  );
+};
+
+export default function ColabApp() {
+  const webViewRef = useRef<WebView>(null);
+  const [canGoBack, setCanGoBack] = useState(false);
+  const [canGoForward, setCanGoForward] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const [currentUrl, setCurrentUrl] = useState(COLAB_URL);
+  const [showNavBar, setShowNavBar] = useState(true);
+  const [keepAwakeEnabled, setKeepAwakeEnabled] = useState(true);
+  const [progress, setProgress] = useState(0);
+
+  // Register background task (native only)
+  const registerBackgroundTask = async () => {
+    if (Platform.OS === 'web' || !BackgroundFetch) return;
+    
+    try {
+      const status = await BackgroundFetch.getStatusAsync();
+      if (status === BackgroundFetch.BackgroundFetchStatus.Available) {
+        await BackgroundFetch.registerTaskAsync(BACKGROUND_FETCH_TASK, {
+          minimumInterval: 15 * 60, // 15 minutes
+          stopOnTerminate: false,
+          startOnBoot: true,
+        });
+        console.log('[Background] Task registered successfully');
+      }
+    } catch (error) {
+      console.log('[Background] Task registration failed:', error);
+    }
+  };
+
+  // Setup keep awake and background tasks
+  useEffect(() => {
+    // Keep screen awake to prevent session timeout (native only)
+    if (Platform.OS !== 'web' && keepAwakeEnabled && activateKeepAwakeAsync) {
+      activateKeepAwakeAsync('colab-session');
+    }
+    
+    // Register background task (native only)
+    if (Platform.OS !== 'web') {
+      registerBackgroundTask();
+    }
+
+    return () => {
+      if (Platform.OS !== 'web' && deactivateKeepAwake) {
+        deactivateKeepAwake('colab-session');
+      }
+    };
+  }, [keepAwakeEnabled]);
+
+  // Handle Android back button
+  useEffect(() => {
+    if (Platform.OS !== 'android') return;
+    
+    const backHandler = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (canGoBack && webViewRef.current) {
+        webViewRef.current.goBack();
+        return true;
+      }
+      return false;
+    });
+
+    return () => backHandler.remove();
+  }, [canGoBack]);
+
+  const handleNavigationStateChange = (navState: WebViewNavigation) => {
+    setCanGoBack(navState.canGoBack);
+    setCanGoForward(navState.canGoForward);
+    setCurrentUrl(navState.url);
+  };
+
+  const goBack = () => {
+    if (webViewRef.current && canGoBack) {
+      webViewRef.current.goBack();
+    }
+  };
+
+  const goForward = () => {
+    if (webViewRef.current && canGoForward) {
+      webViewRef.current.goForward();
+    }
+  };
+
+  const reload = () => {
+    if (webViewRef.current) {
+      webViewRef.current.reload();
+    }
+  };
+
+  const goHome = () => {
+    if (webViewRef.current) {
+      webViewRef.current.injectJavaScript(`window.location.href = '${COLAB_URL}'; true;`);
+    }
+  };
+
+  const toggleKeepAwake = () => {
+    if (Platform.OS === 'web') {
+      Alert.alert('Not Available', 'Keep Awake feature is only available on Android/iOS devices.');
+      return;
+    }
+    
+    if (keepAwakeEnabled) {
+      if (deactivateKeepAwake) deactivateKeepAwake('colab-session');
+      Alert.alert(
+        'Keep Awake Disabled',
+        'Screen may turn off during long operations. Notebooks may timeout.'
+      );
+    } else {
+      if (activateKeepAwakeAsync) activateKeepAwakeAsync('colab-session');
+      Alert.alert(
+        'Keep Awake Enabled',
+        'Screen will stay on to keep your Colab session active.'
+      );
+    }
+    setKeepAwakeEnabled(!keepAwakeEnabled);
+  };
+
+  // JavaScript to inject for better Colab experience
+  const injectedJavaScript = `
+    (function() {
+      // Viewport meta tag for mobile
+      var meta = document.createElement('meta');
+      meta.name = 'viewport';
+      meta.content = 'width=device-width, initial-scale=1.0, maximum-scale=3.0, user-scalable=yes';
+      document.getElementsByTagName('head')[0].appendChild(meta);
+      
+      // Keep session alive by periodic activity
+      setInterval(function() {
+        // Simulate mouse movement to prevent session timeout
+        var event = new MouseEvent('mousemove', {
+          'view': window,
+          'bubbles': true,
+          'cancelable': true,
+          'clientX': Math.random() * 100,
+          'clientY': Math.random() * 100
+        });
+        document.dispatchEvent(event);
+        console.log('[ColabApp] Keeping session alive...');
+      }, 240000); // Every 4 minutes
+      
+      // Prevent the page from prompting to leave
+      window.onbeforeunload = null;
+      
+      true;
+    })();
+  `;
+
+  // Custom User Agent - use mobile Chrome for best compatibility
+  const customUserAgent = Platform.select({
+    android: 'Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36',
+    ios: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1',
+    default: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
+  });
+
+  // Show web fallback
+  if (Platform.OS === 'web') {
+    return (
+      <SafeAreaView style={styles.container}>
+        <StatusBar barStyle="light-content" backgroundColor="#1a1a2e" />
+        
+        {/* Header */}
+        <View style={styles.header}>
+          <View style={styles.headerLeft}>
+            <Ionicons name="logo-google" size={24} color="#F9AB00" />
+            <Text style={styles.headerTitle}>Colab Mobile</Text>
+          </View>
+        </View>
+
+        <ScrollView style={styles.webFallbackContainer} contentContainerStyle={styles.webFallbackContent}>
+          <View style={styles.appIcon}>
+            <Ionicons name="code-working" size={64} color="#F9AB00" />
+          </View>
+          <Text style={styles.appTitle}>Google Colab Mobile</Text>
+          <Text style={styles.appSubtitle}>Your pocket-sized Jupyter notebook</Text>
+          
+          <View style={styles.featureList}>
+            <View style={styles.featureItem}>
+              <Ionicons name="checkmark-circle" size={24} color="#4CAF50" />
+              <Text style={styles.featureText}>Full Google Colab experience</Text>
+            </View>
+            <View style={styles.featureItem}>
+              <Ionicons name="checkmark-circle" size={24} color="#4CAF50" />
+              <Text style={styles.featureText}>Google login supported</Text>
+            </View>
+            <View style={styles.featureItem}>
+              <Ionicons name="checkmark-circle" size={24} color="#4CAF50" />
+              <Text style={styles.featureText}>Keep Awake - prevents session timeout</Text>
+            </View>
+            <View style={styles.featureItem}>
+              <Ionicons name="checkmark-circle" size={24} color="#4CAF50" />
+              <Text style={styles.featureText}>Background task keeps app alive</Text>
+            </View>
+            <View style={styles.featureItem}>
+              <Ionicons name="checkmark-circle" size={24} color="#4CAF50" />
+              <Text style={styles.featureText}>Native navigation controls</Text>
+            </View>
+          </View>
+
+          <View style={styles.instructionBox}>
+            <Ionicons name="phone-portrait-outline" size={32} color="#F9AB00" />
+            <Text style={styles.instructionTitle}>How to use on Mobile</Text>
+            <Text style={styles.instructionText}>
+              1. Download "Expo Go" app from Play Store or App Store{'\n'}
+              2. Scan the QR code shown in the terminal{'\n'}
+              3. Enjoy full Colab experience on your phone!
+            </Text>
+          </View>
+
+          <TouchableOpacity 
+            style={styles.openBrowserBtn}
+            onPress={() => Linking.openURL(COLAB_URL)}
+          >
+            <Ionicons name="open-outline" size={20} color="#fff" />
+            <Text style={styles.openBrowserText}>Open Colab in Browser</Text>
+          </TouchableOpacity>
+        </ScrollView>
+      </SafeAreaView>
+    );
+  }
+
+  return (
+    <SafeAreaView style={styles.container}>
+      <StatusBar barStyle="light-content" backgroundColor="#1a1a2e" />
+      
+      {/* Header */}
+      <View style={styles.header}>
+        <View style={styles.headerLeft}>
+          <Ionicons name="logo-google" size={24} color="#F9AB00" />
+          <Text style={styles.headerTitle}>Colab</Text>
+        </View>
+        <View style={styles.headerRight}>
+          <TouchableOpacity 
+            style={[styles.keepAwakeBtn, keepAwakeEnabled && styles.keepAwakeActive]} 
+            onPress={toggleKeepAwake}
+          >
+            <Ionicons 
+              name={keepAwakeEnabled ? "flash" : "flash-outline"} 
+              size={18} 
+              color={keepAwakeEnabled ? "#4CAF50" : "#888"} 
+            />
+            <Text style={[styles.keepAwakeText, keepAwakeEnabled && styles.keepAwakeTextActive]}>
+              {keepAwakeEnabled ? 'ON' : 'OFF'}
+            </Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+
+      {/* Progress Bar */}
+      {isLoading && (
+        <View style={styles.progressContainer}>
+          <View style={[styles.progressBar, { width: `${progress * 100}%` }]} />
+        </View>
+      )}
+
+      {/* WebView */}
+      <View style={styles.webViewContainer}>
+        <WebView
+          ref={webViewRef}
+          source={{ uri: COLAB_URL }}
+          style={styles.webView}
+          onNavigationStateChange={handleNavigationStateChange}
+          onLoadStart={() => setIsLoading(true)}
+          onLoadEnd={() => setIsLoading(false)}
+          onLoadProgress={({ nativeEvent }) => setProgress(nativeEvent.progress)}
+          injectedJavaScript={injectedJavaScript}
+          userAgent={customUserAgent}
+          javaScriptEnabled={true}
+          domStorageEnabled={true}
+          startInLoadingState={true}
+          scalesPageToFit={true}
+          allowsInlineMediaPlayback={true}
+          mediaPlaybackRequiresUserAction={false}
+          allowsFullscreenVideo={true}
+          mixedContentMode="always"
+          thirdPartyCookiesEnabled={true}
+          sharedCookiesEnabled={true}
+          cacheEnabled={true}
+          incognito={false}
+          setSupportMultipleWindows={false}
+          allowsBackForwardNavigationGestures={true}
+          allowFileAccess={true}
+          allowFileAccessFromFileURLs={true}
+          allowUniversalAccessFromFileURLs={true}
+          geolocationEnabled={true}
+          saveFormDataDisabled={false}
+          textZoom={100}
+          renderLoading={() => (
+            <View style={styles.loadingContainer}>
+              <ActivityIndicator size="large" color="#F9AB00" />
+              <Text style={styles.loadingText}>Loading Google Colab...</Text>
+              <Text style={styles.loadingSubtext}>Sign in with your Google account</Text>
+            </View>
+          )}
+          onError={(syntheticEvent) => {
+            const { nativeEvent } = syntheticEvent;
+            console.warn('WebView error: ', nativeEvent);
+          }}
+          onHttpError={(syntheticEvent) => {
+            const { nativeEvent } = syntheticEvent;
+            console.warn('WebView HTTP error: ', nativeEvent.statusCode);
+          }}
+          onShouldStartLoadWithRequest={(request) => {
+            // Allow Google OAuth redirects
+            if (request.url.includes('accounts.google.com') || 
+                request.url.includes('colab.research.google.com') ||
+                request.url.includes('drive.google.com') ||
+                request.url.includes('googleapis.com')) {
+              return true;
+            }
+            // Open external links in default browser
+            if (!request.url.startsWith('https://colab') && 
+                !request.url.startsWith('https://accounts.google')) {
+              Linking.openURL(request.url);
+              return false;
+            }
+            return true;
+          }}
+        />
+      </View>
+
+      {/* Navigation Bar */}
+      {showNavBar && (
+        <View style={styles.navBar}>
+          <TouchableOpacity 
+            style={[styles.navButton, !canGoBack && styles.navButtonDisabled]} 
+            onPress={goBack}
+            disabled={!canGoBack}
+          >
+            <Ionicons name="chevron-back" size={24} color={canGoBack ? "#fff" : "#555"} />
+          </TouchableOpacity>
+
+          <TouchableOpacity 
+            style={[styles.navButton, !canGoForward && styles.navButtonDisabled]} 
+            onPress={goForward}
+            disabled={!canGoForward}
+          >
+            <Ionicons name="chevron-forward" size={24} color={canGoForward ? "#fff" : "#555"} />
+          </TouchableOpacity>
+
+          <TouchableOpacity style={styles.navButton} onPress={goHome}>
+            <Ionicons name="home" size={22} color="#fff" />
+          </TouchableOpacity>
+
+          <TouchableOpacity style={styles.navButton} onPress={reload}>
+            <Ionicons name="refresh" size={22} color="#fff" />
+          </TouchableOpacity>
+
+          <TouchableOpacity 
+            style={styles.navButton} 
+            onPress={() => setShowNavBar(false)}
+          >
+            <Ionicons name="eye-off" size={22} color="#fff" />
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {/* Show Nav Button when hidden */}
+      {!showNavBar && (
+        <TouchableOpacity 
+          style={styles.showNavButton} 
+          onPress={() => setShowNavBar(true)}
+        >
+          <Ionicons name="menu" size={20} color="#fff" />
+        </TouchableOpacity>
+      )}
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: '#1a1a2e',
+  },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    backgroundColor: '#1a1a2e',
+    borderBottomWidth: 1,
+    borderBottomColor: '#2d2d44',
+  },
+  headerLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  headerTitle: {
+    color: '#fff',
+    fontSize: 20,
+    fontWeight: '700',
+    marginLeft: 8,
+  },
+  headerRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  keepAwakeBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+    backgroundColor: '#2d2d44',
+  },
+  keepAwakeActive: {
+    backgroundColor: 'rgba(76, 175, 80, 0.2)',
+  },
+  keepAwakeText: {
+    color: '#888',
+    fontSize: 12,
+    fontWeight: '600',
+    marginLeft: 4,
+  },
+  keepAwakeTextActive: {
+    color: '#4CAF50',
+  },
+  progressContainer: {
+    height: 2,
+    backgroundColor: '#2d2d44',
+  },
+  progressBar: {
+    height: '100%',
+    backgroundColor: '#F9AB00',
+  },
+  webViewContainer: {
+    flex: 1,
+    backgroundColor: '#fff',
+  },
+  webView: {
+    flex: 1,
+  },
+  loadingContainer: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: '#1a1a2e',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  loadingText: {
+    color: '#fff',
+    marginTop: 12,
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  loadingSubtext: {
+    color: '#888',
+    marginTop: 8,
+    fontSize: 14,
+  },
+  navBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-around',
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    backgroundColor: '#1a1a2e',
+    borderTopWidth: 1,
+    borderTopColor: '#2d2d44',
+  },
+  navButton: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: '#2d2d44',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  navButtonDisabled: {
+    backgroundColor: '#1f1f30',
+  },
+  showNavButton: {
+    position: 'absolute',
+    bottom: 20,
+    right: 20,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(249, 171, 0, 0.9)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    elevation: 5,
+    ...Platform.select({
+      ios: {
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 2 },
+        shadowOpacity: 0.25,
+        shadowRadius: 4,
+      },
+      android: {
+        elevation: 5,
+      },
+    }),
+  },
+  // Web fallback styles
+  iframeContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  webNotice: {
+    color: '#888',
+    fontSize: 14,
+    textAlign: 'center',
+    marginBottom: 20,
+  },
+  webFallbackContainer: {
+    flex: 1,
+  },
+  webFallbackContent: {
+    padding: 24,
+    alignItems: 'center',
+  },
+  appIcon: {
+    width: 100,
+    height: 100,
+    borderRadius: 20,
+    backgroundColor: '#2d2d44',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  appTitle: {
+    color: '#fff',
+    fontSize: 28,
+    fontWeight: '700',
+    marginBottom: 8,
+  },
+  appSubtitle: {
+    color: '#888',
+    fontSize: 16,
+    marginBottom: 32,
+  },
+  featureList: {
+    width: '100%',
+    maxWidth: 400,
+    marginBottom: 32,
+  },
+  featureItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  featureText: {
+    color: '#fff',
+    fontSize: 16,
+    marginLeft: 12,
+  },
+  instructionBox: {
+    backgroundColor: '#2d2d44',
+    borderRadius: 16,
+    padding: 24,
+    alignItems: 'center',
+    marginBottom: 24,
+    width: '100%',
+    maxWidth: 400,
+  },
+  instructionTitle: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '600',
+    marginTop: 12,
+    marginBottom: 12,
+  },
+  instructionText: {
+    color: '#aaa',
+    fontSize: 14,
+    lineHeight: 24,
+    textAlign: 'center',
+  },
+  openBrowserBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F9AB00',
+    paddingHorizontal: 24,
+    paddingVertical: 14,
+    borderRadius: 12,
+  },
+  openBrowserText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
+    marginLeft: 8,
+  },
+  qrInfo: {
+    alignItems: 'center',
+    marginTop: 40,
+  },
+  qrText: {
+    color: '#888',
+    fontSize: 14,
+    textAlign: 'center',
+    marginTop: 16,
+    maxWidth: 250,
+  },
+});
