@@ -168,36 +168,33 @@ export default function KaggleApp() {
     checkPerms();
   }, []);
 
-  const requestBatteryPermission = useCallback(async () => {
+  const requestBatteryPermission = useCallback(() => {
+    setPermBattery(true); // Mark done immediately so UI updates
     try {
       if (Platform.OS === 'android' && IntentLauncher) {
-        await IntentLauncher.startActivityAsync(
+        IntentLauncher.startActivityAsync(
           IntentLauncher.ActivityAction.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
           { data: 'package:com.kaggle.mobile' }
-        );
-        setPermBattery(true);
+        ).catch(() => {
+          try {
+            IntentLauncher.startActivityAsync(
+              IntentLauncher.ActivityAction.IGNORE_BATTERY_OPTIMIZATION_SETTINGS
+            ).catch(() => Linking.openSettings());
+          } catch (e) { Linking.openSettings(); }
+        });
+      } else {
+        Linking.openSettings();
       }
     } catch (e) {
-      try {
-        if (IntentLauncher) {
-          await IntentLauncher.startActivityAsync(
-            IntentLauncher.ActivityAction.IGNORE_BATTERY_OPTIMIZATION_SETTINGS
-          );
-        } else {
-          Linking.openSettings();
-        }
-        setPermBattery(true);
-      } catch (e2) {
-        Linking.openSettings();
-        setPermBattery(true);
-      }
+      try { Linking.openSettings(); } catch (e2) {}
     }
   }, []);
 
-  const requestNotificationPermission = useCallback(async () => {
+  const requestNotificationPermission = useCallback(() => {
+    setPermNotif(true); // Mark done immediately so UI updates
     try {
-      if (Platform.OS === 'android') {
-        const result = await PermissionsAndroid.request(
+      if (Platform.OS === 'android' && PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS) {
+        PermissionsAndroid.request(
           PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS,
           {
             title: `${APP_NAME} Notifications`,
@@ -205,12 +202,9 @@ export default function KaggleApp() {
             buttonPositive: 'Allow',
             buttonNegative: 'Skip',
           }
-        );
-        setPermNotif(true);
+        ).catch(() => {});
       }
-    } catch (e) {
-      setPermNotif(true);
-    }
+    } catch (e) {}
   }, []);
 
   const finishPermSetup = useCallback(async () => {
@@ -1062,6 +1056,9 @@ export default function KaggleApp() {
       <Modal visible={showPermSetup} animationType="slide" transparent>
         <View style={styles.overlay}>
           <View style={styles.permModal}>
+            <TouchableOpacity style={{position:'absolute', top:16, right:16, zIndex:10, width:36, height:36, borderRadius:18, backgroundColor:'#3d3d54', justifyContent:'center', alignItems:'center'}} onPress={finishPermSetup}>
+              <Ionicons name="close" size={22} color="#fff" />
+            </TouchableOpacity>
             <View style={{alignItems:'center', marginBottom:20}}>
               <Ionicons name="settings-outline" size={48} color={APP_COLOR} />
               <Text style={styles.permTitle}>Setup for Best Experience</Text>

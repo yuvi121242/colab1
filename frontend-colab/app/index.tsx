@@ -161,7 +161,6 @@ export default function ColabApp() {
       try {
         const done = await AsyncStorage.getItem(PERMISSIONS_KEY);
         if (!done) {
-          // First launch - show permission setup
           setTimeout(() => setShowPermSetup(true), 1500);
         }
       } catch (e) {}
@@ -169,39 +168,34 @@ export default function ColabApp() {
     checkPerms();
   }, []);
 
-  const requestBatteryPermission = useCallback(async () => {
+  const requestBatteryPermission = useCallback(() => {
+    setPermBattery(true); // Mark done immediately so UI updates
     try {
       if (Platform.OS === 'android' && IntentLauncher) {
-        // Open battery optimization settings for this specific app
-        await IntentLauncher.startActivityAsync(
+        IntentLauncher.startActivityAsync(
           IntentLauncher.ActivityAction.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
           { data: 'package:com.colab.mobile' }
-        );
-        setPermBattery(true);
+        ).catch(() => {
+          // Fallback: open general battery settings
+          try {
+            IntentLauncher.startActivityAsync(
+              IntentLauncher.ActivityAction.IGNORE_BATTERY_OPTIMIZATION_SETTINGS
+            ).catch(() => Linking.openSettings());
+          } catch (e) { Linking.openSettings(); }
+        });
+      } else {
+        Linking.openSettings();
       }
     } catch (e) {
-      // Fallback: open general battery settings
-      try {
-        if (IntentLauncher) {
-          await IntentLauncher.startActivityAsync(
-            IntentLauncher.ActivityAction.IGNORE_BATTERY_OPTIMIZATION_SETTINGS
-          );
-        } else {
-          Linking.openSettings();
-        }
-        setPermBattery(true);
-      } catch (e2) {
-        Linking.openSettings();
-        setPermBattery(true);
-      }
+      try { Linking.openSettings(); } catch (e2) {}
     }
   }, []);
 
-  const requestNotificationPermission = useCallback(async () => {
+  const requestNotificationPermission = useCallback(() => {
+    setPermNotif(true); // Mark done immediately so UI updates
     try {
-      if (Platform.OS === 'android') {
-        // Android 13+ (API 33) requires POST_NOTIFICATIONS runtime permission
-        const result = await PermissionsAndroid.request(
+      if (Platform.OS === 'android' && PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS) {
+        PermissionsAndroid.request(
           PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS,
           {
             title: `${APP_NAME} Notifications`,
@@ -209,11 +203,10 @@ export default function ColabApp() {
             buttonPositive: 'Allow',
             buttonNegative: 'Skip',
           }
-        );
-        setPermNotif(true);
+        ).catch(() => {});
       }
     } catch (e) {
-      setPermNotif(true); // Mark as handled even if it fails (older Android versions)
+      // Older Android - no POST_NOTIFICATIONS permission needed
     }
   }, []);
 
@@ -1088,6 +1081,9 @@ export default function ColabApp() {
       <Modal visible={showPermSetup} animationType="slide" transparent>
         <View style={styles.overlay}>
           <View style={styles.permModal}>
+            <TouchableOpacity style={{position:'absolute', top:16, right:16, zIndex:10, width:36, height:36, borderRadius:18, backgroundColor:'#3d3d54', justifyContent:'center', alignItems:'center'}} onPress={finishPermSetup}>
+              <Ionicons name="close" size={22} color="#fff" />
+            </TouchableOpacity>
             <View style={{alignItems:'center', marginBottom:20}}>
               <Ionicons name="settings-outline" size={48} color={APP_COLOR} />
               <Text style={styles.permTitle}>Setup for Best Experience</Text>
