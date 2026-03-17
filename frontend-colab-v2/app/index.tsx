@@ -222,48 +222,143 @@ export default function ColabApp() {
 
   // ============================================
   // SILENT AUDIO - Background keep-alive
+  // Generate a proper 10-second silent WAV for reliable looping
   // ============================================
-  useEffect(() => {
-    if (Platform.OS === 'web' || !Audio || !bgActive) return;
-
-    let mounted = true;
-    const startSilentAudio = async () => {
-      try {
-        await Audio.setAudioModeAsync({
-          allowsRecordingIOS: false,
-          staysActiveInBackground: true,
-          playsInSilentModeIOS: true,
-          shouldDuckAndroid: true,
-          playThroughEarpieceAndroid: false,
-        });
-
-        const silentWavBase64 = 'UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
-        const { sound } = await Audio.Sound.createAsync(
-          { uri: `data:audio/wav;base64,${silentWavBase64}` },
-          { isLooping: true, volume: 0.01, shouldPlay: true, isMuted: false }
-        );
-
-        if (mounted) {
-          soundRef.current = sound;
-          await sound.playAsync();
-        } else {
-          await sound.unloadAsync();
-        }
-      } catch (e) {
-        console.log('[BG] Silent audio setup failed:', e);
-      }
+  const generateSilentWavBase64 = useCallback(() => {
+    // Generate a 10-second silent WAV at 8000Hz mono 16-bit
+    const sampleRate = 8000;
+    const duration = 10;
+    const numSamples = sampleRate * duration;
+    const dataSize = numSamples * 2; // 16-bit = 2 bytes per sample
+    const headerSize = 44;
+    const totalSize = headerSize + dataSize;
+    
+    const buffer = new ArrayBuffer(totalSize);
+    const view = new DataView(buffer);
+    
+    // WAV header
+    const writeStr = (offset: number, str: string) => {
+      for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
     };
+    writeStr(0, 'RIFF');
+    view.setUint32(4, totalSize - 8, true);
+    writeStr(8, 'WAVE');
+    writeStr(12, 'fmt ');
+    view.setUint32(16, 16, true); // chunk size
+    view.setUint16(20, 1, true);  // PCM
+    view.setUint16(22, 1, true);  // mono
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * 2, true); // byte rate
+    view.setUint16(32, 2, true);  // block align
+    view.setUint16(34, 16, true); // bits per sample
+    writeStr(36, 'data');
+    view.setUint32(40, dataSize, true);
+    // Data is all zeros (silence) - ArrayBuffer is zero-initialized
+    
+    // Convert to base64
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    // Use btoa if available, otherwise manual base64
+    if (typeof btoa === 'function') {
+      return btoa(binary);
+    }
+    // Manual base64 encoding
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+    let result = '';
+    for (let i = 0; i < binary.length; i += 3) {
+      const a = binary.charCodeAt(i);
+      const b = i + 1 < binary.length ? binary.charCodeAt(i + 1) : 0;
+      const c = i + 2 < binary.length ? binary.charCodeAt(i + 2) : 0;
+      result += chars[a >> 2] + chars[((a & 3) << 4) | (b >> 4)] +
+        (i + 1 < binary.length ? chars[((b & 15) << 2) | (c >> 6)] : '=') +
+        (i + 2 < binary.length ? chars[c & 63] : '=');
+    }
+    return result;
+  }, []);
 
-    startSilentAudio();
+  const startSilentAudio = useCallback(async () => {
+    if (Platform.OS === 'web' || !Audio) return;
+    
+    try {
+      // Stop existing sound first
+      if (soundRef.current) {
+        try {
+          await soundRef.current.stopAsync();
+          await soundRef.current.unloadAsync();
+        } catch (e) {}
+        soundRef.current = null;
+      }
+
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: false,
+        staysActiveInBackground: true,
+        playsInSilentModeIOS: true,
+        shouldDuckAndroid: true,
+        playThroughEarpieceAndroid: false,
+      });
+
+      const wavBase64 = generateSilentWavBase64();
+      const { sound } = await Audio.Sound.createAsync(
+        { uri: `data:audio/wav;base64,${wavBase64}` },
+        { isLooping: true, volume: 0.01, shouldPlay: true, isMuted: false }
+      );
+
+      soundRef.current = sound;
+      await sound.playAsync();
+      console.log('[BG] Silent audio started successfully');
+    } catch (e) {
+      console.log('[BG] Silent audio setup failed:', e);
+    }
+  }, [generateSilentWavBase64]);
+
+  // Start/stop silent audio based on bgActive toggle
+  useEffect(() => {
+    if (Platform.OS === 'web' || !Audio) return;
+
+    if (bgActive) {
+      startSilentAudio();
+    } else {
+      if (soundRef.current) {
+        soundRef.current.stopAsync().then(() => soundRef.current?.unloadAsync()).catch(() => {});
+        soundRef.current = null;
+      }
+    }
 
     return () => {
-      mounted = false;
       if (soundRef.current) {
         soundRef.current.stopAsync().then(() => soundRef.current?.unloadAsync()).catch(() => {});
         soundRef.current = null;
       }
     };
-  }, [bgActive]);
+  }, [bgActive, startSilentAudio]);
+
+  // Periodically check and restart silent audio if it stopped (every 30s)
+  useEffect(() => {
+    if (Platform.OS === 'web' || !Audio || !bgActive) return;
+    
+    const audioWatchdog = setInterval(async () => {
+      if (!soundRef.current) {
+        console.log('[BG] Audio watchdog: sound is null, restarting...');
+        startSilentAudio();
+        return;
+      }
+      try {
+        const status = await soundRef.current.getStatusAsync();
+        if (!status.isLoaded || !status.isPlaying) {
+          console.log('[BG] Audio watchdog: not playing, restarting...');
+          startSilentAudio();
+        }
+      } catch (e) {
+        console.log('[BG] Audio watchdog: error checking status, restarting...');
+        startSilentAudio();
+      }
+    }, 30000);
+
+    return () => clearInterval(audioWatchdog);
+  }, [bgActive, startSilentAudio]);
 
   // ============================================
   // STATE PERSISTENCE
@@ -357,25 +452,37 @@ export default function ColabApp() {
       }
 
       if (appState.current.match(/inactive|background/) && nextAppState === 'active') {
+        // Re-activate keep awake
         if (keepAwake && activateKeepAwakeAsync) activateKeepAwakeAsync('colab');
 
-        const ref = webViewRefs.current[activeTabId];
-        if (ref) {
-          ref.injectJavaScript(`
-            (function() {
-              try {
-                Object.defineProperty(document, 'hidden', { get: function() { return false; }, configurable: true });
-                Object.defineProperty(document, 'visibilityState', { get: function() { return 'visible'; }, configurable: true });
-              } catch(e) {}
-              window.dispatchEvent(new Event('focus'));
-              document.dispatchEvent(new Event('focus'));
-              window.dispatchEvent(new Event('online'));
-              true;
-            })();
-          `);
+        // Restart silent audio if it was stopped by the system
+        if (bgActive) {
+          startSilentAudio();
+        }
 
-          // Auto-reconnect check after 2 seconds
-          setTimeout(() => {
+        // Poke ALL tabs (not just active) to prevent them from being stale
+        Object.keys(webViewRefs.current).forEach(tabId => {
+          const ref = webViewRefs.current[tabId];
+          if (ref) {
+            ref.injectJavaScript(`
+              (function() {
+                try {
+                  Object.defineProperty(document, 'hidden', { get: function() { return false; }, configurable: true });
+                  Object.defineProperty(document, 'visibilityState', { get: function() { return 'visible'; }, configurable: true });
+                } catch(e) {}
+                window.dispatchEvent(new Event('focus'));
+                document.dispatchEvent(new Event('focus'));
+                window.dispatchEvent(new Event('online'));
+                true;
+              })();
+            `);
+          }
+        });
+
+        // Delayed auto-reconnect check for active tab
+        setTimeout(() => {
+          const ref = webViewRefs.current[activeTabId];
+          if (ref) {
             ref.injectJavaScript(`
               (function() {
                 var btns = document.querySelectorAll(
@@ -394,14 +501,14 @@ export default function ColabApp() {
                 true;
               })();
             `);
-          }, 2000);
-        }
+          }
+        }, 2000);
       }
 
       appState.current = nextAppState;
     });
     return () => subscription.remove();
-  }, [keepAwake, activeTabId, saveState]);
+  }, [keepAwake, activeTabId, saveState, bgActive, startSilentAudio]);
 
   // ============================================
   // BOOKMARKS
@@ -652,10 +759,20 @@ export default function ColabApp() {
         </View>
       )}
 
-      {/* WEBVIEW - All tabs rendered, only active visible */}
+      {/* WEBVIEW - All tabs rendered with absolute positioning
+          Using zIndex instead of display:none to prevent Android from pausing/unloading WebViews */}
       <View style={styles.webViewContainer}>
         {tabs.map(tab => (
-          <View key={tab.id} style={[styles.webViewWrap, { display: tab.id === activeTabId ? 'flex' : 'none' }]}>
+          <View key={tab.id} style={[
+            styles.webViewWrap,
+            styles.webViewAbsolute,
+            {
+              zIndex: tab.id === activeTabId ? 1 : 0,
+              opacity: tab.id === activeTabId ? 1 : 0,
+            }
+          ]}
+            pointerEvents={tab.id === activeTabId ? 'auto' : 'none'}
+          >
             <WebView
               ref={ref => { webViewRefs.current[tab.id] = ref; }}
               source={{ uri: tab.url }}
@@ -920,8 +1037,9 @@ const styles = StyleSheet.create({
   progressFill: { height: '100%' },
 
   // WebView
-  webViewContainer: { flex: 1, backgroundColor: '#fff' },
+  webViewContainer: { flex: 1, backgroundColor: '#fff', position: 'relative' },
   webViewWrap: { flex: 1 },
+  webViewAbsolute: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 },
   webView: { flex: 1 },
   loading: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: '#1a1a2e', justifyContent: 'center', alignItems: 'center' },
   loadingText: { color: '#fff', marginTop: 12, fontSize: 16 },
