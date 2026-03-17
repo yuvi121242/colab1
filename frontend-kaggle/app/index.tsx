@@ -894,9 +894,18 @@ export default function KaggleApp() {
               onLoadEnd={() => tab.id === activeTabId && setIsLoading(false)}
               onLoadProgress={({nativeEvent}) => tab.id === activeTabId && setProgress(nativeEvent.progress)}
               
-              // Popup handling: setSupportMultipleWindows=false prevents external browser
-              // Auth URLs caught by JS window.open override
-              setSupportMultipleWindows={false}
+              // Native popup: patched WebViewTransport creates real window.opener
+              // In Expo Go: falls back to JS modal via onOpenWindow
+              setSupportMultipleWindows={true}
+              onOpenWindow={(syntheticEvent: any) => {
+                const url = syntheticEvent?.nativeEvent?.targetUrl;
+                if (url) {
+                  setAuthPopupUrl(url);
+                  setAuthPopupId(0);
+                  setAuthParentTabId(tab.id);
+                  setAuthPopupVisible(true);
+                }
+              }}
               
               originWhitelist={['*']}
               onShouldStartLoadWithRequest={handleShouldStartLoad}

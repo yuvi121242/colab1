@@ -48,6 +48,7 @@ workflows:
       - name: Install and fix versions
         script: |
           npm install
+          npx patch-package || true
           npx expo install expo-font expo-system-ui expo-build-properties expo-av expo-intent-launcher
           npx expo install --fix
 

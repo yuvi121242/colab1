@@ -1,0 +1,136 @@
+diff --git a/node_modules/react-native-webview/android/src/main/java/com/reactnativecommunity/webview/RNCWebChromeClient.java b/node_modules/react-native-webview/android/src/main/java/com/reactnativecommunity/webview/RNCWebChromeClient.java
+index 07f73fd..2463c65 100644
+--- a/node_modules/react-native-webview/android/src/main/java/com/reactnativecommunity/webview/RNCWebChromeClient.java
++++ b/node_modules/react-native-webview/android/src/main/java/com/reactnativecommunity/webview/RNCWebChromeClient.java
+@@ -90,26 +90,117 @@ public class RNCWebChromeClient extends WebChromeClient implements LifecycleEven
+ 
+         final WebView newWebView = new WebView(view.getContext());
+         
+-        if(mHasOnOpenWindowEvent) {
+-            newWebView.setWebViewClient(new WebViewClient(){
++        // Copy essential settings from parent
++        newWebView.getSettings().setJavaScriptEnabled(true);
++        newWebView.getSettings().setDomStorageEnabled(true);
++        newWebView.getSettings().setSupportMultipleWindows(false);
++        newWebView.getSettings().setUserAgentString(view.getSettings().getUserAgentString());
++        newWebView.getSettings().setJavaScriptCanOpenWindowsAutomatically(true);
++        
++        // Enable cookies for auth
++        android.webkit.CookieManager.getInstance().setAcceptCookie(true);
++        android.webkit.CookieManager.getInstance().setAcceptThirdPartyCookies(newWebView, true);
++
++        // Set up the transport - THIS creates real window.opener connection
++        final WebView.WebViewTransport transport = (WebView.WebViewTransport) resultMsg.obj;
++        transport.setWebView(newWebView);
++        resultMsg.sendToTarget();
++
++        // Show the child WebView in a Dialog (like flutter_inappwebview does)
++        final android.app.Dialog dialog = new android.app.Dialog(view.getContext(), android.R.style.Theme_DeviceDefault_NoActionBar);
++        
++        // Create a layout with a close button header
++        android.widget.LinearLayout layout = new android.widget.LinearLayout(view.getContext());
++        layout.setOrientation(android.widget.LinearLayout.VERTICAL);
++        layout.setBackgroundColor(0xFF1A1A2E);
++        
++        // Header bar with close button
++        android.widget.LinearLayout header = new android.widget.LinearLayout(view.getContext());
++        header.setOrientation(android.widget.LinearLayout.HORIZONTAL);
++        header.setGravity(Gravity.CENTER_VERTICAL);
++        header.setBackgroundColor(0xFF252538);
++        header.setPadding(32, 16, 16, 16);
++        
++        android.widget.TextView title = new android.widget.TextView(view.getContext());
++        title.setText("Google Authentication");
++        title.setTextColor(0xFFFFFFFF);
++        title.setTextSize(16);
++        android.widget.LinearLayout.LayoutParams titleParams = new android.widget.LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
++        title.setLayoutParams(titleParams);
++        header.addView(title);
++        
++        android.widget.Button closeBtn = new android.widget.Button(view.getContext());
++        closeBtn.setText("✕");
++        closeBtn.setTextColor(0xFFFFFFFF);
++        closeBtn.setBackgroundColor(0xFF3D3D54);
++        closeBtn.setOnClickListener(new View.OnClickListener() {
+             @Override
+-            public boolean shouldOverrideUrlLoading (WebView subview, String url) {
+-                WritableMap event = Arguments.createMap();
+-                event.putString("targetUrl", url);
++            public void onClick(View v) {
++                newWebView.destroy();
++                dialog.dismiss();
++            }
++        });
++        header.addView(closeBtn);
+         
+-                ((RNCWebView) view).dispatchEvent(
+-                    view,
+-                    new TopOpenWindowEvent(RNCWebViewWrapper.getReactTagFromWebView(view), event)
+-                );
++        layout.addView(header, new android.widget.LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
++        layout.addView(newWebView, new android.widget.LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
++        
++        dialog.setContentView(layout);
++        dialog.setCancelable(true);
++        dialog.setOnDismissListener(new android.content.DialogInterface.OnDismissListener() {
++            @Override
++            public void onDismiss(android.content.DialogInterface d) {
++                newWebView.destroy();
++            }
++        });
+         
+-                return true;
++        // Watch for "close this tab" text in the child WebView
++        newWebView.setWebViewClient(new WebViewClient() {
++            @Override
++            public void onPageFinished(WebView wv, String url) {
++                super.onPageFinished(wv, url);
++                // Check if page says "close this tab"
++                wv.evaluateJavascript(
++                    "(function() { var t = document.body ? document.body.innerText : ''; " +
++                    "return (t.indexOf('close this tab') !== -1 || t.indexOf('close this window') !== -1 || t.indexOf('Please close') !== -1); })()",
++                    new android.webkit.ValueCallback<String>() {
++                        @Override
++                        public void onReceiveValue(String value) {
++                            if ("true".equals(value)) {
++                                // Auto-close after 2 seconds
++                                newWebView.postDelayed(new Runnable() {
++                                    @Override
++                                    public void run() {
++                                        dialog.dismiss();
++                                    }
++                                }, 2000);
++                            }
++                        }
++                    }
++                );
+             }
+-            });
++        });
++
++        // Also fire the onOpenWindow event if handler exists (for compatibility)
++        if(mHasOnOpenWindowEvent) {
++            // Extract URL from the new WebView after a short delay
++            newWebView.postDelayed(new Runnable() {
++                @Override
++                public void run() {
++                    String url = newWebView.getUrl();
++                    if (url != null) {
++                        WritableMap event = Arguments.createMap();
++                        event.putString("targetUrl", url);
++                        ((RNCWebView) view).dispatchEvent(
++                            view,
++                            new TopOpenWindowEvent(RNCWebViewWrapper.getReactTagFromWebView(view), event)
++                        );
++                    }
++                }
++            }, 500);
+         }
+         
+-        final WebView.WebViewTransport transport = (WebView.WebViewTransport) resultMsg.obj;
+-        transport.setWebView(newWebView);
+-        resultMsg.sendToTarget();
++        dialog.show();
+ 
+         return true;
+     }
