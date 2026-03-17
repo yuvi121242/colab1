@@ -1,40 +1,136 @@
 workflows:
   react-native-android:
     name: Build Colab APK
-    max_build_duration: 60
+    max_build_duration: 120
     instance_type: mac_mini_m1
     working_directory: frontend-colab
     environment:
       node: 18
       java: 17
     scripts:
-      - name: Install dependencies
+      - name: Fix dependencies
+        script: |
+          python3 << 'PYEOF'
+          import json
+          with open('package.json','r') as f: d=json.load(f)
+          deps=d.get('dependencies',{})
+          deps.pop('expo-background-fetch',None)
+          deps.pop('expo-task-manager',None)
+          deps['@react-native-async-storage/async-storage']='2.1.0'
+          d['dependencies']=deps
+          with open('package.json','w') as f: json.dump(d,f,indent=2)
+          PYEOF
+      - name: Create icon images
+        script: |
+          pip3 install Pillow
+          mkdir -p assets/images
+          python3 << 'PYEOF'
+          from PIL import Image
+          import os
+          os.makedirs('assets/images', exist_ok=True)
+          img=Image.new('RGBA',(1024,1024),(249,171,0,255))
+          img.save('assets/images/icon.png')
+          img.save('assets/images/adaptive-icon.png')
+          img.save('assets/images/favicon.png')
+          PYEOF
+      - name: Install and fix versions
         script: |
           npm install
+          npx expo install expo-font expo-system-ui expo-build-properties
+          npx expo install --fix
+          python3 << 'PYEOF'
+          import json
+          with open('app.json','r') as f: d=json.load(f)
+          plugins=[p for p in d['expo'].get('plugins',[]) if not (isinstance(p,list) and p[0]=='expo-build-properties')]
+          plugins.append(['expo-build-properties',{'android':{'kotlinVersion':'1.9.24','compileSdkVersion':35,'targetSdkVersion':34}}])
+          d['expo']['plugins']=plugins
+          with open('app.json','w') as f: json.dump(d,f,indent=2)
+          PYEOF
+      - name: Prebuild Android
+        script: |
+          rm -rf android
+          npx expo prebuild --platform android --clean
+      - name: Fix Android build config
+        script: |
+          echo "android.defaults.buildfeatures.buildconfig=true" >> android/gradle.properties
+          echo "android.nonTransitiveRClass=false" >> android/gradle.properties
+          python3 << 'PYEOF'
+          with open('android/app/build.gradle','r') as f: c=f.read()
+          if 'buildFeatures' not in c:
+            c=c.replace('android {','android {\n    buildFeatures {\n        buildConfig = true\n    }',1)
+            with open('android/app/build.gradle','w') as f: f.write(c)
+          PYEOF
       - name: Build Android
         script: |
-          npx expo prebuild --platform android --clean
           cd android
-          ./gradlew assembleRelease
+          ./gradlew clean assembleRelease
     artifacts:
       - frontend-colab/android/app/build/outputs/**/*.apk
 
   kaggle-android:
     name: Build Kaggle APK
-    max_build_duration: 60
+    max_build_duration: 120
     instance_type: mac_mini_m1
     working_directory: frontend-kaggle
     environment:
       node: 18
       java: 17
     scripts:
-      - name: Install dependencies
+      - name: Fix dependencies
+        script: |
+          python3 << 'PYEOF'
+          import json
+          with open('package.json','r') as f: d=json.load(f)
+          deps=d.get('dependencies',{})
+          deps.pop('expo-background-fetch',None)
+          deps.pop('expo-task-manager',None)
+          deps['@react-native-async-storage/async-storage']='2.1.0'
+          d['dependencies']=deps
+          with open('package.json','w') as f: json.dump(d,f,indent=2)
+          PYEOF
+      - name: Create icon images
+        script: |
+          pip3 install Pillow
+          mkdir -p assets/images
+          python3 << 'PYEOF'
+          from PIL import Image
+          import os
+          os.makedirs('assets/images', exist_ok=True)
+          img=Image.new('RGBA',(1024,1024),(32,190,255,255))
+          img.save('assets/images/icon.png')
+          img.save('assets/images/adaptive-icon.png')
+          img.save('assets/images/favicon.png')
+          PYEOF
+      - name: Install and fix versions
         script: |
           npm install
+          npx expo install expo-font expo-system-ui expo-build-properties
+          npx expo install --fix
+          python3 << 'PYEOF'
+          import json
+          with open('app.json','r') as f: d=json.load(f)
+          plugins=[p for p in d['expo'].get('plugins',[]) if not (isinstance(p,list) and p[0]=='expo-build-properties')]
+          plugins.append(['expo-build-properties',{'android':{'kotlinVersion':'1.9.24','compileSdkVersion':35,'targetSdkVersion':34}}])
+          d['expo']['plugins']=plugins
+          with open('app.json','w') as f: json.dump(d,f,indent=2)
+          PYEOF
+      - name: Prebuild Android
+        script: |
+          rm -rf android
+          npx expo prebuild --platform android --clean
+      - name: Fix Android build config
+        script: |
+          echo "android.defaults.buildfeatures.buildconfig=true" >> android/gradle.properties
+          echo "android.nonTransitiveRClass=false" >> android/gradle.properties
+          python3 << 'PYEOF'
+          with open('android/app/build.gradle','r') as f: c=f.read()
+          if 'buildFeatures' not in c:
+            c=c.replace('android {','android {\n    buildFeatures {\n        buildConfig = true\n    }',1)
+            with open('android/app/build.gradle','w') as f: f.write(c)
+          PYEOF
       - name: Build Android
         script: |
-          npx expo prebuild --platform android --clean
           cd android
-          ./gradlew assembleRelease
+          ./gradlew clean assembleRelease
     artifacts:
       - frontend-kaggle/android/app/build/outputs/**/*.apk

@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import {
   View,
   StyleSheet,
@@ -11,23 +11,20 @@ import {
   Alert,
   Linking,
   ScrollView,
-  useWindowDimensions,
   Modal,
   FlatList,
+  AppState,
+  AppStateStatus,
 } from 'react-native';
 import { WebView, WebViewNavigation } from 'react-native-webview';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-let TaskManager: any = null;
-let BackgroundFetch: any = null;
 let activateKeepAwakeAsync: any = null;
 let deactivateKeepAwake: any = null;
 
 if (Platform.OS !== 'web') {
-  TaskManager = require('expo-task-manager');
-  BackgroundFetch = require('expo-background-fetch');
   const keepAwake = require('expo-keep-awake');
   activateKeepAwakeAsync = keepAwake.activateKeepAwakeAsync;
   deactivateKeepAwake = keepAwake.deactivateKeepAwake;
@@ -36,24 +33,30 @@ if (Platform.OS !== 'web') {
 const APP_URL = 'https://www.kaggle.com/';
 const APP_NAME = 'Kaggle';
 const APP_COLOR = '#20BEFF';
-const BACKGROUND_FETCH_TASK = 'kaggle-keep-alive';
-
-if (Platform.OS !== 'web' && TaskManager) {
-  TaskManager.defineTask(BACKGROUND_FETCH_TASK, async () => {
-    try { return BackgroundFetch.BackgroundFetchResult.NewData; }
-    catch (e) { return BackgroundFetch.BackgroundFetchResult.Failed; }
-  });
-}
+const STORAGE_KEY = 'kaggle_app_state';
 
 const MOBILE_UA = 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/125.0.0.0 Mobile Safari/537.36';
 const DESKTOP_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125.0.0.0 Safari/537.36';
 
 interface Tab { id: string; url: string; title: string; }
 interface Bookmark { id: string; title: string; url: string; createdAt: number; }
+interface AppSavedState {
+  tabs: Tab[];
+  activeTabId: string;
+  desktopMode: boolean;
+  keepAwake: boolean;
+  antiIdle: boolean;
+  zoomLevel: number;
+  showNavBar: boolean;
+  bookmarks: Bookmark[];
+}
 
 export default function KaggleApp() {
   const insets = useSafeAreaInsets();
   const webViewRefs = useRef<{ [key: string]: WebView | null }>({});
+  const appState = useRef(AppState.currentState);
+  const stateLoaded = useRef(false);
+  const saveTimeout = useRef<any>(null);
   
   const [tabs, setTabs] = useState<Tab[]>([{ id: '1', url: APP_URL, title: APP_NAME }]);
   const [activeTabId, setActiveTabId] = useState('1');
@@ -76,27 +79,82 @@ export default function KaggleApp() {
   const topPadding = Math.max(insets.top, statusBarHeight, 24);
   const bottomPadding = Math.max(insets.bottom, 10);
 
-  useEffect(() => { loadBookmarks(); }, []);
-  
-  const loadBookmarks = async () => {
+  // ============================================
+  // STATE PERSISTENCE
+  // ============================================
+  const saveState = useCallback(async () => {
     try {
-      const saved = await AsyncStorage.getItem('kaggle_bookmarks');
-      if (saved) setBookmarks(JSON.parse(saved));
+      const state: AppSavedState = {
+        tabs, activeTabId, desktopMode, keepAwake, antiIdle, zoomLevel, showNavBar, bookmarks,
+      };
+      await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(state));
     } catch (e) {}
-  };
+  }, [tabs, activeTabId, desktopMode, keepAwake, antiIdle, zoomLevel, showNavBar, bookmarks]);
 
+  const debouncedSave = useCallback(() => {
+    if (saveTimeout.current) clearTimeout(saveTimeout.current);
+    saveTimeout.current = setTimeout(() => {
+      if (stateLoaded.current) saveState();
+    }, 500);
+  }, [saveState]);
+
+  useEffect(() => { debouncedSave(); }, [tabs, activeTabId, desktopMode, keepAwake, antiIdle, zoomLevel, showNavBar, bookmarks, debouncedSave]);
+
+  useEffect(() => {
+    const loadState = async () => {
+      try {
+        const saved = await AsyncStorage.getItem(STORAGE_KEY);
+        if (saved) {
+          const state: AppSavedState = JSON.parse(saved);
+          if (state.tabs && state.tabs.length > 0) setTabs(state.tabs);
+          if (state.activeTabId) setActiveTabId(state.activeTabId);
+          if (state.desktopMode !== undefined) setDesktopMode(state.desktopMode);
+          if (state.keepAwake !== undefined) setKeepAwake(state.keepAwake);
+          if (state.antiIdle !== undefined) setAntiIdle(state.antiIdle);
+          if (state.zoomLevel !== undefined) setZoomLevel(state.zoomLevel);
+          if (state.showNavBar !== undefined) setShowNavBar(state.showNavBar);
+          if (state.bookmarks) setBookmarks(state.bookmarks);
+        }
+      } catch (e) {}
+      stateLoaded.current = true;
+    };
+    loadState();
+  }, []);
+
+  // ============================================
+  // APP STATE - Save on background
+  // ============================================
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (nextAppState: AppStateStatus) => {
+      if (nextAppState === 'background' || nextAppState === 'inactive') {
+        saveState();
+      }
+      if (appState.current.match(/inactive|background/) && nextAppState === 'active') {
+        if (keepAwake && activateKeepAwakeAsync) activateKeepAwakeAsync('kaggle');
+        if (antiIdle && webViewRefs.current[activeTabId]) {
+          webViewRefs.current[activeTabId]?.injectJavaScript(`
+            window.dispatchEvent(new Event('focus'));
+            document.dispatchEvent(new Event('focus'));
+            true;
+          `);
+        }
+      }
+      appState.current = nextAppState;
+    });
+    return () => subscription.remove();
+  }, [keepAwake, antiIdle, activeTabId, saveState]);
+
+  // ============================================
+  // BOOKMARKS
+  // ============================================
   const saveBookmark = async () => {
     const bm: Bookmark = { id: Date.now().toString(), title: currentTitle, url: currentUrl, createdAt: Date.now() };
-    const updated = [...bookmarks, bm];
-    setBookmarks(updated);
-    await AsyncStorage.setItem('kaggle_bookmarks', JSON.stringify(updated));
+    setBookmarks(prev => [...prev, bm]);
     Alert.alert('Saved!', 'Bookmark added');
   };
 
   const deleteBookmark = async (id: string) => {
-    const updated = bookmarks.filter(b => b.id !== id);
-    setBookmarks(updated);
-    await AsyncStorage.setItem('kaggle_bookmarks', JSON.stringify(updated));
+    setBookmarks(prev => prev.filter(b => b.id !== id));
   };
 
   useEffect(() => {
@@ -115,7 +173,7 @@ export default function KaggleApp() {
 
   const addTab = () => {
     const t: Tab = { id: Date.now().toString(), url: APP_URL, title: 'New Tab' };
-    setTabs([...tabs, t]);
+    setTabs(prev => [...prev, t]);
     setActiveTabId(t.id);
   };
 
@@ -135,47 +193,68 @@ export default function KaggleApp() {
   const zoomOut = () => { const z = Math.max(zoomLevel - 25, 50); setZoomLevel(z); webViewRefs.current[activeTabId]?.injectJavaScript(`document.body.style.zoom='${z}%';true;`); };
   const resetZoom = () => { setZoomLevel(100); webViewRefs.current[activeTabId]?.injectJavaScript(`document.body.style.zoom='100%';true;`); };
 
-  const antiIdleScript = `
+  const requestBatteryOptimization = useCallback(() => {
+    if (Platform.OS === 'android') Linking.openSettings();
+  }, []);
+
+  const handleShouldStartLoad = useCallback((request: any) => {
+    const url = request.url || '';
+    if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('about:') || url.startsWith('data:')) return true;
+    if (url.startsWith('intent://')) {
+      const fallbackMatch = url.match(/S\.browser_fallback_url=([^;]+)/);
+      if (fallbackMatch) {
+        webViewRefs.current[activeTabId]?.injectJavaScript(`window.location.href='${decodeURIComponent(fallbackMatch[1])}';true;`);
+      }
+      return false;
+    }
+    try { Linking.openURL(url); } catch (e) {}
+    return false;
+  }, [activeTabId]);
+
+  const handleOpenWindow = useCallback((syntheticEvent: any) => {
+    const url = syntheticEvent?.nativeEvent?.targetUrl;
+    if (url) webViewRefs.current[activeTabId]?.injectJavaScript(`window.location.href='${url}';true;`);
+  }, [activeTabId]);
+
+  const getInjectedScript = () => `
     (function() {
-      let antiIdleTimeout;
-      
+      if (!window._openOverridden) {
+        window._openOverridden = true;
+        window.open = function(url, target, features) {
+          if (url) {
+            if (window.ReactNativeWebView) window.ReactNativeWebView.postMessage(JSON.stringify({type:'OPEN_URL',url:url}));
+            window.location.href = url;
+          }
+          return window;
+        };
+      }
+      if (window._antiIdleTimer) clearTimeout(window._antiIdleTimer);
       function safeActivity() {
-        // SAFE actions only - no clicks, no key presses
-        
-        // 1. Mouse movement (safe)
-        const x = Math.floor(Math.random() * window.innerWidth);
-        const y = Math.floor(Math.random() * window.innerHeight);
+        var x = Math.floor(Math.random() * window.innerWidth);
+        var y = Math.floor(Math.random() * window.innerHeight);
         document.dispatchEvent(new MouseEvent('mousemove', {clientX: x, clientY: y, bubbles: true}));
-        
-        // 2. Small scroll (safe, -25 to +25 pixels)
         window.scrollBy({ top: Math.floor(Math.random() * 50) - 25, behavior: 'smooth' });
-        
-        // 3. Focus events (safe)
         window.dispatchEvent(new Event('focus'));
         document.dispatchEvent(new Event('focus'));
-        
-        // 4. Mouseover on body (safe)
         document.body.dispatchEvent(new MouseEvent('mouseover', {clientX: x, clientY: y, bubbles: true}));
-        
-        console.log('[AntiIdle] Safe activity at ' + new Date().toLocaleTimeString());
-        
-        // Schedule next at random 30-90 seconds
-        antiIdleTimeout = setTimeout(safeActivity, 30000 + Math.random() * 60000);
+        window._antiIdleTimer = setTimeout(safeActivity, 30000 + Math.random() * 60000);
       }
-      
-      if(${antiIdle}) {
-        setTimeout(safeActivity, 5000 + Math.random() * 10000);
-        console.log('[AntiIdle] SAFE mode started');
-      }
-      
+      if (${antiIdle}) { window._antiIdleTimer = setTimeout(safeActivity, 5000 + Math.random() * 10000); }
       var meta = document.querySelector('meta[name="viewport"]') || document.createElement('meta');
       meta.name = 'viewport';
       meta.content = ${desktopMode} ? 'width=1200,initial-scale=0.5,maximum-scale=3,user-scalable=yes' : 'width=device-width,initial-scale=1,maximum-scale=3,user-scalable=yes';
-      if(!document.querySelector('meta[name="viewport"]')) document.head.appendChild(meta);
+      if (!document.querySelector('meta[name="viewport"]')) document.head.appendChild(meta);
       window.onbeforeunload = null;
       true;
     })();
   `;
+
+  const handleMessage = useCallback((event: any) => {
+    try {
+      const data = JSON.parse(event.nativeEvent.data);
+      if (data.type === 'OPEN_URL' && data.url) webViewRefs.current[activeTabId]?.injectJavaScript(`window.location.href='${data.url}';true;`);
+    } catch (e) {}
+  }, [activeTabId]);
 
   if (Platform.OS === 'web') {
     return (
@@ -245,11 +324,33 @@ export default function KaggleApp() {
               onLoadStart={() => tab.id === activeTabId && setIsLoading(true)}
               onLoadEnd={() => tab.id === activeTabId && setIsLoading(false)}
               onLoadProgress={({nativeEvent}) => tab.id === activeTabId && setProgress(nativeEvent.progress)}
-              injectedJavaScript={antiIdleScript}
+              setSupportMultipleWindows={false}
+              originWhitelist={['*']}
+              onShouldStartLoadWithRequest={handleShouldStartLoad}
+              onOpenWindow={handleOpenWindow}
+              onMessage={handleMessage}
+              injectedJavaScript={getInjectedScript()}
               userAgent={desktopMode ? DESKTOP_UA : MOBILE_UA}
-              javaScriptEnabled domStorageEnabled startInLoadingState allowsInlineMediaPlayback
-              mixedContentMode="always" thirdPartyCookiesEnabled sharedCookiesEnabled cacheEnabled allowsBackForwardNavigationGestures
-              renderLoading={() => <View style={styles.loading}><ActivityIndicator size="large" color={APP_COLOR} /><Text style={styles.loadingText}>Loading...</Text></View>}
+              javaScriptEnabled={true}
+              domStorageEnabled={true}
+              startInLoadingState={true}
+              allowsInlineMediaPlayback={true}
+              mixedContentMode="always"
+              thirdPartyCookiesEnabled={true}
+              sharedCookiesEnabled={true}
+              cacheEnabled={true}
+              allowsBackForwardNavigationGestures={true}
+              allowFileAccess={true}
+              allowFileAccessFromFileURLs={true}
+              allowUniversalAccessFromFileURLs={true}
+              mediaPlaybackRequiresUserAction={false}
+              androidLayerType="hardware"
+              renderLoading={() => (
+                <View style={styles.loading}>
+                  <ActivityIndicator size="large" color={APP_COLOR} />
+                  <Text style={styles.loadingText}>Loading {APP_NAME}...</Text>
+                </View>
+              )}
             />
           </View>
         ))}
@@ -278,7 +379,7 @@ export default function KaggleApp() {
             <TouchableOpacity style={styles.qItem} onPress={() => {zoomIn(); setShowQuickActions(false);}}><Ionicons name="add-circle" size={24} color="#4CAF50" /><Text style={styles.qText}>Zoom In ({zoomLevel}%)</Text></TouchableOpacity>
             <TouchableOpacity style={styles.qItem} onPress={() => {zoomOut(); setShowQuickActions(false);}}><Ionicons name="remove-circle" size={24} color="#FF5722" /><Text style={styles.qText}>Zoom Out</Text></TouchableOpacity>
             <TouchableOpacity style={styles.qItem} onPress={() => {resetZoom(); setShowQuickActions(false);}}><Ionicons name="resize" size={24} color="#9C27B0" /><Text style={styles.qText}>Reset Zoom</Text></TouchableOpacity>
-            <TouchableOpacity style={styles.qItem} onPress={() => {Linking.openSettings(); setShowQuickActions(false);}}><Ionicons name="battery-charging" size={24} color="#4CAF50" /><Text style={styles.qText}>Battery Settings</Text></TouchableOpacity>
+            <TouchableOpacity style={styles.qItem} onPress={() => {requestBatteryOptimization(); setShowQuickActions(false);}}><Ionicons name="battery-charging" size={24} color="#4CAF50" /><Text style={styles.qText}>Battery Settings</Text></TouchableOpacity>
             {!showNavBar && <TouchableOpacity style={styles.qItem} onPress={() => {setShowNavBar(true); setShowQuickActions(false);}}><Ionicons name="chevron-up" size={24} color="#fff" /><Text style={styles.qText}>Show Nav Bar</Text></TouchableOpacity>}
           </View>
         </TouchableOpacity>
