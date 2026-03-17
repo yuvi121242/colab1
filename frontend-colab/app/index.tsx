@@ -58,7 +58,7 @@ interface AppSavedState {
   bookmarks: Bookmark[];
 }
 
-// JS injected BEFORE page loads - suppresses dialogs, locks visibility, and bridges window.open
+// JS injected BEFORE page loads - suppresses dialogs & locks visibility API
 const EARLY_INJECT_JS = `
 (function() {
   // Kill beforeunload dialogs completely
@@ -93,167 +93,6 @@ const EARLY_INJECT_JS = `
   window.addEventListener('pagehide', function(e) { e.stopImmediatePropagation(); e.stopPropagation(); }, true);
   window.addEventListener('freeze', function(e) { e.stopImmediatePropagation(); e.stopPropagation(); }, true);
 
-  // === POPUP BRIDGE: Override window.open ===
-  // Returns a fake window object so Colab keeps waiting for auth
-  // The auth result is relayed back via React Native message bridge
-  window._popupId = 0;
-  window._popups = {};
-  
-  var _origOpen = window.open;
-  window.open = function(url, target, features) {
-    if (url) {
-      var id = ++window._popupId;
-      
-      // Create fake window object that Colab can interact with
-      var fakeWin = {
-        closed: false,
-        close: function() { this.closed = true; },
-        focus: function() {},
-        blur: function() {},
-        postMessage: function(msg, origin) {},
-        location: { href: url, toString: function() { return url; } },
-        document: { write: function(){}, close: function(){} }
-      };
-      
-      window._popups[id] = fakeWin;
-      
-      // Tell React Native to open this URL in a new auth tab
-      if (window.ReactNativeWebView) {
-        window.ReactNativeWebView.postMessage(JSON.stringify({
-          type: 'OPEN_POPUP',
-          url: url,
-          popupId: id
-        }));
-      }
-      
-      return fakeWin;
-    }
-    return _origOpen ? _origOpen.apply(window, arguments) : null;
-  };
-
-  // Listen for auth results relayed back from React Native
-  window.addEventListener('message', function(e) {
-    try {
-      var data = typeof e.data === 'string' ? JSON.parse(e.data) : e.data;
-      if (data && data._fromAuthPopup) {
-        // Re-dispatch as a regular message event with the original auth data
-        // This is what the auth callback would have sent via window.opener.postMessage
-      }
-    } catch(ex) {}
-  });
-
-  true;
-})();
-`;
-
-// JS injected into AUTH POPUP WebView - comprehensive credential bridge
-const AUTH_POPUP_INJECT_JS = `
-(function() {
-  var _relayed = false;
-  
-  function relayToMain(message, targetOrigin) {
-    if (_relayed) return; // Only relay once
-    _relayed = true;
-    if (window.ReactNativeWebView) {
-      window.ReactNativeWebView.postMessage(JSON.stringify({
-        type: 'AUTH_RELAY',
-        message: typeof message === 'string' ? message : JSON.stringify(message),
-        targetOrigin: targetOrigin || '*'
-      }));
-    }
-  }
-  
-  // === Method 1: Fake window.opener (standard OAuth popup flow) ===
-  try {
-    Object.defineProperty(window, 'opener', {
-      get: function() {
-        return {
-          postMessage: function(msg, origin) { relayToMain(msg, origin); },
-          closed: false,
-          location: { href: 'https://colab.research.google.com/', origin: 'https://colab.research.google.com' },
-          origin: 'https://colab.research.google.com'
-        };
-      },
-      set: function() {},
-      configurable: true
-    });
-  } catch(e) {
-    window.opener = {
-      postMessage: function(msg, origin) { relayToMain(msg, origin); },
-      closed: false,
-      location: { href: 'https://colab.research.google.com/' }
-    };
-  }
-  
-  // === Method 2: Intercept parent.postMessage ===
-  try {
-    if (window.parent && window.parent !== window) {
-      var origParentPM = window.parent.postMessage;
-      window.parent.postMessage = function(msg, origin) {
-        relayToMain(msg, origin);
-        if (origParentPM) origParentPM.call(window.parent, msg, origin);
-      };
-    }
-  } catch(e) {}
-  
-  // === Method 3: Intercept BroadcastChannel ===
-  try {
-    var OrigBC = window.BroadcastChannel;
-    if (OrigBC) {
-      window.BroadcastChannel = function(name) {
-        var bc = new OrigBC(name);
-        var origPost = bc.postMessage.bind(bc);
-        bc.postMessage = function(msg) {
-          relayToMain(msg, '*');
-          origPost(msg);
-        };
-        return bc;
-      };
-    }
-  } catch(e) {}
-  
-  // === Method 4: Watch for "close this tab" BUT with 3-second delay ===
-  // Don't close instantly - wait for credential relay to complete
-  var _closeSent = false;
-  function checkAuthDone() {
-    if (_closeSent) return;
-    var text = document.body ? document.body.innerText : '';
-    if (text.indexOf('close this tab') !== -1 || 
-        text.indexOf('close this window') !== -1 || 
-        text.indexOf('Please close this') !== -1 ||
-        text.indexOf('successfully authenticated') !== -1) {
-      _closeSent = true;
-      // Wait 3 seconds to ensure credential relay happened
-      setTimeout(function() {
-        if (window.ReactNativeWebView) {
-          window.ReactNativeWebView.postMessage(JSON.stringify({type: 'AUTH_DONE'}));
-        }
-      }, 3000);
-    }
-  }
-  setInterval(checkAuthDone, 1500);
-  setTimeout(checkAuthDone, 2000);
-  if (typeof MutationObserver !== 'undefined') {
-    document.addEventListener('DOMContentLoaded', function() {
-      if (document.body) {
-        new MutationObserver(checkAuthDone).observe(document.body, {childList: true, subtree: true, characterData: true});
-      }
-    });
-  }
-  
-  // === Method 5: Monitor URL for auth codes ===
-  var _lastUrl = '';
-  setInterval(function() {
-    var url = window.location.href;
-    if (url !== _lastUrl) {
-      _lastUrl = url;
-      // Check if URL contains auth code/token
-      if (url.indexOf('code=') !== -1 || url.indexOf('token=') !== -1 || url.indexOf('approval') !== -1) {
-        relayToMain(JSON.stringify({type: 'auth_code', url: url}), '*');
-      }
-    }
-  }, 500);
-  
   true;
 })();
 `;
@@ -287,13 +126,6 @@ export default function ColabApp() {
   const [showPermSetup, setShowPermSetup] = useState(false);
   const [permBattery, setPermBattery] = useState(false);
   const [permNotif, setPermNotif] = useState(false);
-  
-  // Auth popup modal state
-  const [showAuthPopup, setShowAuthPopup] = useState(false);
-  const [authPopupUrl, setAuthPopupUrl] = useState('');
-  const [authPopupId, setAuthPopupId] = useState(0);
-  const [authParentTabId, setAuthParentTabId] = useState('');
-  const authWebViewRef = useRef<WebView | null>(null);
 
   const statusBarHeight = Platform.OS === 'android' ? StatusBar.currentHeight || 24 : 0;
   const topPadding = Math.max(insets.top, statusBarHeight, 24);
@@ -585,12 +417,11 @@ export default function ColabApp() {
   useEffect(() => {
     if (Platform.OS !== 'android') return;
     const handler = BackHandler.addEventListener('hardwareBackPress', () => {
-      if (showAuthPopup) { closeAuthPopup(); return true; }
       if (canGoBack) { webViewRefs.current[activeTabId]?.goBack(); return true; }
       return false;
     });
     return () => handler.remove();
-  }, [canGoBack, activeTabId, showAuthPopup, closeAuthPopup]);
+  }, [canGoBack, activeTabId]);
 
   // ============================================
   // TAB MANAGEMENT
@@ -644,25 +475,16 @@ export default function ColabApp() {
   }, [activeTabId]);
 
   // ============================================
-  // AUTH POPUP MODAL MANAGEMENT
+  // HANDLE MESSAGES FROM WEBVIEW
   // ============================================
-  const closeAuthPopup = useCallback((popId?: number) => {
-    const pid = popId || authPopupId;
-    if (authParentTabId && webViewRefs.current[authParentTabId] && pid) {
-      webViewRefs.current[authParentTabId]?.injectJavaScript(`
-        if (window._popups && window._popups[${pid}]) {
-          window._popups[${pid}].closed = true;
-        }
-        true;
-      `);
-    }
-    setShowAuthPopup(false);
-    setAuthPopupUrl('');
-  }, [authParentTabId, authPopupId]);
-
-  // ============================================
-  // INJECTED JAVASCRIPT - Anti-idle (for main tabs only)
-  // ============================================
+  const handleMessage = useCallback((event: any, tabId: string) => {
+    try {
+      const data = JSON.parse(event.nativeEvent.data);
+      if (data.type === 'OPEN_URL' && data.url) {
+        webViewRefs.current[activeTabId]?.injectJavaScript(`window.location.href='${data.url}';true;`);
+      }
+    } catch (e) {}
+  }, [activeTabId]);
   const getInjectedScript = () => `
     (function() {
       // Kill beforeunload dialogs
@@ -743,64 +565,6 @@ export default function ColabApp() {
       true;
     })();
   `;
-
-  // ============================================
-  // HANDLE MESSAGES FROM WEBVIEW (main tabs)
-  // ============================================
-  const handleMessage = useCallback((event: any, tabId: string) => {
-    try {
-      const data = JSON.parse(event.nativeEvent.data);
-      
-      // Main WebView requests a popup for auth → show overlay modal
-      if (data.type === 'OPEN_POPUP' && data.url) {
-        setAuthPopupUrl(data.url);
-        setAuthPopupId(data.popupId || 0);
-        setAuthParentTabId(tabId);
-        setShowAuthPopup(true);
-      }
-      
-      if (data.type === 'OPEN_URL' && data.url) {
-        webViewRefs.current[activeTabId]?.injectJavaScript(`window.location.href='${data.url}';true;`);
-      }
-    } catch (e) {}
-  }, [activeTabId]);
-
-  // Handle messages from the AUTH POPUP modal WebView
-  const handleAuthPopupMessage = useCallback((event: any) => {
-    try {
-      const data = JSON.parse(event.nativeEvent.data);
-      
-      // Auth callback relays token via window.opener.postMessage
-      if (data.type === 'AUTH_RELAY') {
-        if (authParentTabId && webViewRefs.current[authParentTabId]) {
-          // Relay the credential message to the main Colab WebView
-          const msg = data.message;
-          webViewRefs.current[authParentTabId]?.injectJavaScript(`
-            try {
-              // Method 1: postMessage (standard)
-              window.postMessage(${JSON.stringify(msg)}, '${data.targetOrigin || '*'}');
-              
-              // Method 2: Dispatch a MessageEvent directly
-              var evt = new MessageEvent('message', {
-                data: ${JSON.stringify(msg)},
-                origin: '${data.targetOrigin || 'https://accounts.google.com'}',
-                source: null
-              });
-              window.dispatchEvent(evt);
-            } catch(e) {}
-            true;
-          `);
-        }
-        // Close popup after giving Colab time to process the credential
-        setTimeout(() => closeAuthPopup(), 1500);
-      }
-      
-      // Auth done (text "close this tab" detected) - already delayed 3s in JS
-      if (data.type === 'AUTH_DONE') {
-        closeAuthPopup();
-      }
-    } catch (e) {}
-  }, [authParentTabId, closeAuthPopup]);
 
   // ============================================
   // WEBVIEW PROCESS DEATH HANDLER
@@ -899,14 +663,15 @@ export default function ColabApp() {
               onLoadEnd={() => tab.id === activeTabId && setIsLoading(false)}
               onLoadProgress={({nativeEvent}) => tab.id === activeTabId && setProgress(nativeEvent.progress)}
               
-              // window.open is overridden via JS bridge - no native popup handling
+              // In-place auth: Google OAuth navigates within this same WebView
+              // No popups or separate WebViews needed
               setSupportMultipleWindows={false}
               
               originWhitelist={['*']}
               onShouldStartLoadWithRequest={handleShouldStartLoad}
               onMessage={(e) => handleMessage(e, tab.id)}
               
-              // Main tabs use EARLY_INJECT_JS (with window.open bridge) + anti-idle
+              // Inject visibility lock + anti-idle scripts
               injectedJavaScriptBeforeContentLoaded={EARLY_INJECT_JS}
               injectedJavaScript={getInjectedScript()}
               
@@ -985,50 +750,6 @@ export default function ColabApp() {
                 </View>
               )} />
             )}
-          </View>
-        </View>
-      </Modal>
-
-      {/* AUTH POPUP MODAL - 60% height overlay with Google auth */}
-      <Modal visible={showAuthPopup} animationType="slide" transparent>
-        <View style={styles.authOverlay}>
-          {/* Tap outside to close */}
-          <TouchableOpacity style={styles.authOverlayBg} activeOpacity={1} onPress={() => closeAuthPopup()} />
-          
-          <View style={styles.authPopupContainer}>
-            {/* Header bar */}
-            <View style={styles.authPopupHeader}>
-              <Ionicons name="lock-closed" size={16} color="#F9AB00" />
-              <Text style={styles.authPopupTitle}>Google Authentication</Text>
-              <TouchableOpacity onPress={() => closeAuthPopup()} style={styles.authPopupClose}>
-                <Ionicons name="close" size={22} color="#fff" />
-              </TouchableOpacity>
-            </View>
-            
-            {/* Auth WebView */}
-            {authPopupUrl ? (
-              <WebView
-                ref={authWebViewRef}
-                source={{uri: authPopupUrl}}
-                style={{flex:1, borderBottomLeftRadius:16, borderBottomRightRadius:16}}
-                injectedJavaScriptBeforeContentLoaded={AUTH_POPUP_INJECT_JS}
-                onMessage={handleAuthPopupMessage}
-                javaScriptEnabled={true}
-                domStorageEnabled={true}
-                thirdPartyCookiesEnabled={true}
-                sharedCookiesEnabled={true}
-                mixedContentMode="always"
-                originWhitelist={['*']}
-                userAgent={DESKTOP_UA}
-                startInLoadingState={true}
-                renderLoading={() => (
-                  <View style={[styles.loading, {borderBottomLeftRadius:16, borderBottomRightRadius:16}]}>
-                    <ActivityIndicator size="large" color="#F9AB00" />
-                    <Text style={styles.loadingText}>Loading Google Auth...</Text>
-                  </View>
-                )}
-              />
-            ) : null}
           </View>
         </View>
       </Modal>
@@ -1144,12 +865,6 @@ const styles = StyleSheet.create({
   subtitle: {color:'#888', fontSize:16, marginBottom:20},
   btn: {paddingHorizontal:24, paddingVertical:14, borderRadius:12},
   btnText: {color:'#fff', fontSize:16, fontWeight:'600'},
-  authOverlay: {flex:1, backgroundColor:'rgba(0,0,0,0.5)', justifyContent:'flex-end'},
-  authOverlayBg: {flex:0.35},
-  authPopupContainer: {flex:0.65, backgroundColor:'#1a1a2e', borderTopLeftRadius:20, borderTopRightRadius:20, overflow:'hidden'},
-  authPopupHeader: {flexDirection:'row', alignItems:'center', paddingHorizontal:16, paddingVertical:12, backgroundColor:'#252538', borderTopLeftRadius:20, borderTopRightRadius:20, gap:8},
-  authPopupTitle: {color:'#fff', fontSize:15, fontWeight:'600', flex:1},
-  authPopupClose: {width:32, height:32, borderRadius:16, backgroundColor:'#3d3d54', justifyContent:'center', alignItems:'center'},
   permModal: {width:'90%', backgroundColor:'#1e1e36', borderRadius:20, padding:24, maxHeight:'80%'},
   permTitle: {color:'#fff', fontSize:22, fontWeight:'700', marginTop:12, textAlign:'center'},
   permDesc: {color:'#aaa', fontSize:14, textAlign:'center', marginTop:8, lineHeight:20},

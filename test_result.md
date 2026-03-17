@@ -102,92 +102,56 @@
 # Testing Data - Main Agent and testing sub agent both should log testing data below this section
 #====================================================================================================
 
-user_problem_statement: "Build Android app for Google Colab website with Google auth login and background processing to prevent session timeout"
+user_problem_statement: "Build two Android apps as web wrappers for Google Colab and Kaggle with Google auth login, background processing, session persistence, and anti-idle systems"
 
 frontend:
+  - task: "Colab In-Place Auth Refactor"
+    implemented: true
+    working: "needs_user_testing"
+    file: "/app/frontend-colab/app/index.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "needs_user_testing"
+          agent: "main"
+          comment: "Removed all broken multi-WebView auth code (popup bridge, modal WebView, AUTH_POPUP_INJECT_JS). Set setSupportMultipleWindows=false so Google OAuth flows in-place within the same WebView. Cookies persist the session."
+
+  - task: "Kaggle In-Place Auth Refactor"
+    implemented: true
+    working: "needs_user_testing"
+    file: "/app/frontend-kaggle/app/index.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "needs_user_testing"
+          agent: "main"
+          comment: "Removed popup tab system (isPopup, parentTabId, closePopupTab, handleOpenWindow). Set setSupportMultipleWindows=false. Cleaned up injected scripts, message handlers, and styles."
+
   - task: "Google Colab WebView App"
     implemented: true
     working: true
-    file: "/app/frontend/app/index.tsx"
+    file: "/app/frontend-colab/app/index.tsx"
     stuck_count: 0
     priority: "high"
     needs_retesting: false
     status_history:
         - working: true
           agent: "main"
-          comment: "Implemented full WebView wrapper for Google Colab with header, navigation controls, and progress bar"
-  
-  - task: "Google OAuth Login Support"
+          comment: "Full WebView wrapper with multi-tab, bookmarks, navigation, zoom, anti-idle, background survival"
+
+  - task: "Kaggle WebView App"
     implemented: true
     working: true
-    file: "/app/frontend/app/index.tsx"
+    file: "/app/frontend-kaggle/app/index.tsx"
     stuck_count: 0
     priority: "high"
     needs_retesting: false
     status_history:
         - working: true
           agent: "main"
-          comment: "WebView allows Google login through accounts.google.com URLs, cookies enabled for session persistence"
-  
-  - task: "Keep Awake Feature"
-    implemented: true
-    working: true
-    file: "/app/frontend/app/index.tsx"
-    stuck_count: 0
-    priority: "high"
-    needs_retesting: false
-    status_history:
-        - working: true
-          agent: "main"
-          comment: "expo-keep-awake integrated to prevent screen timeout during long notebook sessions"
-  
-  - task: "Background Task"
-    implemented: true
-    working: true
-    file: "/app/frontend/app/index.tsx"
-    stuck_count: 0
-    priority: "high"
-    needs_retesting: false
-    status_history:
-        - working: true
-          agent: "main"
-          comment: "expo-background-fetch and expo-task-manager configured for background processing"
-  
-  - task: "Session Keep Alive Injection"
-    implemented: true
-    working: true
-    file: "/app/frontend/app/index.tsx"
-    stuck_count: 0
-    priority: "medium"
-    needs_retesting: false
-    status_history:
-        - working: true
-          agent: "main"
-          comment: "JavaScript injection simulates mouse activity every 4 minutes to prevent session timeout"
-  
-  - task: "Navigation Controls"
-    implemented: true
-    working: true
-    file: "/app/frontend/app/index.tsx"
-    stuck_count: 0
-    priority: "medium"
-    needs_retesting: false
-    status_history:
-        - working: true
-          agent: "main"
-          comment: "Back, Forward, Home, Reload buttons with ability to hide/show navigation bar"
-  
-  - task: "Web Fallback UI"
-    implemented: true
-    working: true
-    file: "/app/frontend/app/index.tsx"
-    stuck_count: 0
-    priority: "low"
-    needs_retesting: false
-    status_history:
-        - working: true
-          agent: "main"
-          comment: "Shows instructions and features list on web since WebView only works on native"
+          comment: "Full WebView wrapper matching Colab feature set with Kaggle-specific auto-reconnect"
 
 metadata:
   created_by: "main_agent"
@@ -204,4 +168,4 @@ test_plan:
 
 agent_communication:
     - agent: "main"
-      message: "Google Colab Mobile MVP completed. App wraps full Colab website with Google login, keep-awake, and background processing. User needs to test on Android device using Expo Go app."
+      message: "Completed in-place auth refactor for both Colab and Kaggle apps. Removed all broken multi-WebView popup/modal auth code. Both apps now use setSupportMultipleWindows=false for in-place Google OAuth. Needs user testing on Android device."

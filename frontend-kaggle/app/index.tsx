@@ -45,7 +45,7 @@ const STORAGE_KEY = 'kaggle_app_state';
 const MOBILE_UA = 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/125.0.0.0 Mobile Safari/537.36';
 const DESKTOP_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125.0.0.0 Safari/537.36';
 
-interface Tab { id: string; url: string; title: string; isPopup?: boolean; parentTabId?: string; }
+interface Tab { id: string; url: string; title: string; }
 interface Bookmark { id: string; title: string; url: string; createdAt: number; }
 interface AppSavedState {
   tabs: Tab[];
@@ -123,9 +123,7 @@ export default function KaggleApp() {
   const stateLoaded = useRef(false);
   const saveTimeout = useRef<any>(null);
   const soundRef = useRef<any>(null);
-  const bgTimerRef = useRef<any>(null);
   const periodicSaveRef = useRef<any>(null);
-  const webViewAliveRef = useRef<{ [key: string]: number }>({});
   
   const [tabs, setTabs] = useState<Tab[]>([{ id: '1', url: APP_URL, title: APP_NAME }]);
   const [activeTabId, setActiveTabId] = useState('1');
@@ -270,7 +268,7 @@ export default function KaggleApp() {
   // ============================================
   const saveState = useCallback(async () => {
     try {
-      const persistTabs = tabs.filter(t => !t.isPopup).map(t => ({...t, isPopup: undefined, parentTabId: undefined}));
+      const persistTabs = tabs.map(t => ({id: t.id, url: t.url, title: t.title}));
       const state: AppSavedState = {
         tabs: persistTabs.length > 0 ? persistTabs : [{ id: '1', url: APP_URL, title: APP_NAME }],
         activeTabId: persistTabs.find(t => t.id === activeTabId) ? activeTabId : (persistTabs[0]?.id || '1'),
@@ -428,16 +426,11 @@ export default function KaggleApp() {
   useEffect(() => {
     if (Platform.OS !== 'android') return;
     const handler = BackHandler.addEventListener('hardwareBackPress', () => {
-      const activeTab = tabs.find(t => t.id === activeTabId);
-      if (activeTab?.isPopup && activeTab?.parentTabId) {
-        closePopupTab(activeTabId, activeTab.parentTabId);
-        return true;
-      }
       if (canGoBack) { webViewRefs.current[activeTabId]?.goBack(); return true; }
       return false;
     });
     return () => handler.remove();
-  }, [canGoBack, activeTabId, tabs]);
+  }, [canGoBack, activeTabId]);
 
   // ============================================
   // TAB MANAGEMENT
@@ -455,22 +448,10 @@ export default function KaggleApp() {
     setTabs(newTabs);
   };
 
-  const closePopupTab = useCallback((popupId: string, parentId: string) => {
-    setTabs(prev => prev.filter(t => t.id !== popupId));
-    setActiveTabId(parentId);
-  }, []);
-
   // ============================================
   // NAVIGATION
   // ============================================
-  const goBack = () => {
-    const activeTab = tabs.find(t => t.id === activeTabId);
-    if (activeTab?.isPopup && activeTab?.parentTabId) {
-      closePopupTab(activeTabId, activeTab.parentTabId);
-    } else {
-      webViewRefs.current[activeTabId]?.goBack();
-    }
-  };
+  const goBack = () => webViewRefs.current[activeTabId]?.goBack();
   const goForward = () => webViewRefs.current[activeTabId]?.goForward();
   const reload = () => webViewRefs.current[activeTabId]?.reload();
   const goHome = () => webViewRefs.current[activeTabId]?.injectJavaScript(`window.location.href='${APP_URL}';true;`);
@@ -503,27 +484,9 @@ export default function KaggleApp() {
   }, [activeTabId]);
 
   // ============================================
-  // HANDLE POPUP WINDOWS (OAuth, Google login)
-  // ============================================
-  const handleOpenWindow = useCallback((syntheticEvent: any) => {
-    const url = syntheticEvent?.nativeEvent?.targetUrl;
-    if (url) {
-      const popupTab: Tab = {
-        id: 'popup_' + Date.now().toString(),
-        url: url,
-        title: 'Authenticating...',
-        isPopup: true,
-        parentTabId: activeTabId,
-      };
-      setTabs(prev => [...prev, popupTab]);
-      setActiveTabId(popupTab.id);
-    }
-  }, [activeTabId]);
-
-  // ============================================
   // INJECTED JAVASCRIPT - Full anti-idle + background survival
   // ============================================
-  const getInjectedScript = (isPopup: boolean = false) => `
+  const getInjectedScript = () => `
     (function() {
       // Kill beforeunload dialogs
       window.onbeforeunload = null;
@@ -537,23 +500,7 @@ export default function KaggleApp() {
         delete e.returnValue;
       }, true);
 
-      ${isPopup ? `
-        // POPUP TAB: Watch for "close this tab" message
-        function checkCloseMessage() {
-          var text = document.body ? document.body.innerText : '';
-          if (text.indexOf('close this tab') !== -1 || text.indexOf('close this window') !== -1 || text.indexOf('Please close this') !== -1) {
-            if (window.ReactNativeWebView) {
-              window.ReactNativeWebView.postMessage(JSON.stringify({type: 'CLOSE_POPUP'}));
-            }
-          }
-        }
-        setInterval(checkCloseMessage, 1000);
-        if (typeof MutationObserver !== 'undefined') {
-          new MutationObserver(checkCloseMessage).observe(document, {childList: true, subtree: true, characterData: true});
-        }
-        setTimeout(checkCloseMessage, 500);
-      ` : `
-        // ====== LIGHTWEIGHT ANTI-IDLE SYSTEM ======
+      // ====== LIGHTWEIGHT ANTI-IDLE SYSTEM ======
         // 3 consolidated timers instead of 12 to prevent UI freezing
         
         // Clear previous timers
@@ -614,7 +561,6 @@ export default function KaggleApp() {
           ? 'width=1200,initial-scale=0.5,maximum-scale=3,user-scalable=yes' 
           : 'width=device-width,initial-scale=1,maximum-scale=3,user-scalable=yes';
         if (!document.querySelector('meta[name="viewport"]')) document.head.appendChild(meta);
-      `}
       
       true;
     })();
@@ -626,30 +572,18 @@ export default function KaggleApp() {
   const handleMessage = useCallback((event: any, tabId: string) => {
     try {
       const data = JSON.parse(event.nativeEvent.data);
-      if (data.type === 'CLOSE_POPUP') {
-        const tab = tabs.find(t => t.id === tabId);
-        if (tab?.isPopup && tab?.parentTabId) {
-          closePopupTab(tabId, tab.parentTabId);
-        }
-      }
-      if (data.type === 'ALIVE_PING') {
-        webViewAliveRef.current[tabId] = data.timestamp;
-      }
       if (data.type === 'OPEN_URL' && data.url) {
         webViewRefs.current[activeTabId]?.injectJavaScript(`window.location.href='${data.url}';true;`);
       }
     } catch (e) {}
-  }, [activeTabId, tabs, closePopupTab]);
+  }, [activeTabId]);
 
   // ============================================
   // WEBVIEW PROCESS DEATH HANDLER
   // ============================================
   const handleRenderProcessGone = useCallback((tabId: string) => {
-    const tab = tabs.find(t => t.id === tabId);
-    if (tab && !tab.isPopup) {
-      webViewRefs.current[tabId]?.reload();
-    }
-  }, [tabs]);
+    webViewRefs.current[tabId]?.reload();
+  }, []);
 
   const handleContentProcessDidTerminate = useCallback((tabId: string) => {
     webViewRefs.current[tabId]?.reload();
@@ -703,17 +637,10 @@ export default function KaggleApp() {
       <View style={styles.tabsBar}>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{flex:1}}>
           {tabs.map(tab => (
-            <TouchableOpacity key={tab.id} style={[styles.tab, tab.id === activeTabId && styles.tabActive, tab.isPopup && styles.tabPopup]} onPress={() => setActiveTabId(tab.id)}>
-              {tab.isPopup && <Ionicons name="lock-closed" size={12} color="#20BEFF" style={{marginRight:4}} />}
+            <TouchableOpacity key={tab.id} style={[styles.tab, tab.id === activeTabId && styles.tabActive]} onPress={() => setActiveTabId(tab.id)}>
               <Text style={[styles.tabText, tab.id === activeTabId && styles.tabTextActive]} numberOfLines={1}>{tab.title}</Text>
               {(tabs.length > 1) && (
-                <TouchableOpacity onPress={() => {
-                  if (tab.isPopup && tab.parentTabId) {
-                    closePopupTab(tab.id, tab.parentTabId);
-                  } else {
-                    closeTab(tab.id);
-                  }
-                }} style={styles.tabClose}>
+                <TouchableOpacity onPress={() => closeTab(tab.id)} style={styles.tabClose}>
                   <Ionicons name="close" size={16} color="#888" />
                 </TouchableOpacity>
               )}
@@ -740,21 +667,21 @@ export default function KaggleApp() {
                   setCurrentUrl(nav.url);
                   setCurrentTitle(nav.title || APP_NAME);
                 }
-                setTabs(prev => prev.map(t => t.id === tab.id ? {...t, title: nav.title || (t.isPopup ? 'Auth' : 'Tab'), url: nav.url} : t));
+                setTabs(prev => prev.map(t => t.id === tab.id ? {...t, title: nav.title || 'Tab', url: nav.url} : t));
               }}
               onLoadStart={() => tab.id === activeTabId && setIsLoading(true)}
               onLoadEnd={() => tab.id === activeTabId && setIsLoading(false)}
               onLoadProgress={({nativeEvent}) => tab.id === activeTabId && setProgress(nativeEvent.progress)}
               
-              setSupportMultipleWindows={true}
-              onOpenWindow={handleOpenWindow}
+              // In-place auth: Google OAuth navigates within this same WebView
+              setSupportMultipleWindows={false}
               
               originWhitelist={['*']}
               onShouldStartLoadWithRequest={handleShouldStartLoad}
               onMessage={(e) => handleMessage(e, tab.id)}
               
               injectedJavaScriptBeforeContentLoaded={EARLY_INJECT_JS}
-              injectedJavaScript={getInjectedScript(!!tab.isPopup)}
+              injectedJavaScript={getInjectedScript()}
               
               userAgent={desktopMode ? DESKTOP_UA : MOBILE_UA}
               javaScriptEnabled={true}
@@ -778,7 +705,7 @@ export default function KaggleApp() {
               renderLoading={() => (
                 <View style={styles.loading}>
                   <ActivityIndicator size="large" color={APP_COLOR} />
-                  <Text style={styles.loadingText}>{tab.isPopup ? 'Authenticating...' : `Loading ${APP_NAME}...`}</Text>
+                  <Text style={styles.loadingText}>Loading {APP_NAME}...</Text>
                 </View>
               )}
             />
@@ -913,7 +840,6 @@ const styles = StyleSheet.create({
   tabsBar: {flexDirection:'row', backgroundColor:'#252538', borderBottomWidth:1, borderBottomColor:'#2d2d44'},
   tab: {flexDirection:'row', alignItems:'center', paddingHorizontal:16, paddingVertical:10, borderRightWidth:1, borderRightColor:'#2d2d44', maxWidth:150},
   tabActive: {backgroundColor:'#1a1a2e'},
-  tabPopup: {borderBottomWidth:2, borderBottomColor:'#20BEFF'},
   tabText: {color:'#888', fontSize:13, flex:1},
   tabTextActive: {color:'#fff'},
   tabClose: {marginLeft:8, padding:2},
