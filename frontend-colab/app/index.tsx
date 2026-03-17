@@ -45,7 +45,7 @@ const STORAGE_KEY = 'colab_app_state';
 const MOBILE_UA = 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/125.0.0.0 Mobile Safari/537.36';
 const DESKTOP_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125.0.0.0 Safari/537.36';
 
-interface Tab { id: string; url: string; title: string; }
+interface Tab { id: string; url: string; title: string; isPopup?: boolean; parentTabId?: string; popupId?: number; }
 interface Bookmark { id: string; title: string; url: string; createdAt: number; }
 interface AppSavedState {
   tabs: Tab[];
@@ -58,7 +58,7 @@ interface AppSavedState {
   bookmarks: Bookmark[];
 }
 
-// JS injected BEFORE page loads - suppresses dialogs & locks visibility API
+// JS injected BEFORE page loads - suppresses dialogs, locks visibility, and bridges window.open
 const EARLY_INJECT_JS = `
 (function() {
   // Kill beforeunload dialogs completely
@@ -82,36 +82,108 @@ const EARLY_INJECT_JS = `
   };
 
   // === CRITICAL: Lock Page Visibility API BEFORE page loads ===
-  // This prevents Colab from ever knowing the page lost focus
   try {
     Object.defineProperty(document, 'hidden', { get: function() { return false; }, configurable: true });
     Object.defineProperty(document, 'visibilityState', { get: function() { return 'visible'; }, configurable: true });
   } catch(e) {}
 
-  // Block all visibilitychange events - page never knows it went to background
-  document.addEventListener('visibilitychange', function(e) {
-    e.stopImmediatePropagation();
-    e.stopPropagation();
-  }, true);
+  // Block visibilitychange, blur, pagehide, freeze events
+  document.addEventListener('visibilitychange', function(e) { e.stopImmediatePropagation(); e.stopPropagation(); }, true);
+  window.addEventListener('blur', function(e) { e.stopImmediatePropagation(); e.stopPropagation(); }, true);
+  window.addEventListener('pagehide', function(e) { e.stopImmediatePropagation(); e.stopPropagation(); }, true);
+  window.addEventListener('freeze', function(e) { e.stopImmediatePropagation(); e.stopPropagation(); }, true);
 
-  // Block blur events on window - page thinks window always has focus
-  window.addEventListener('blur', function(e) {
-    e.stopImmediatePropagation();
-    e.stopPropagation();
-  }, true);
+  // === POPUP BRIDGE: Override window.open ===
+  // Returns a fake window object so Colab keeps waiting for auth
+  // The auth result is relayed back via React Native message bridge
+  window._popupId = 0;
+  window._popups = {};
+  
+  var _origOpen = window.open;
+  window.open = function(url, target, features) {
+    if (url) {
+      var id = ++window._popupId;
+      
+      // Create fake window object that Colab can interact with
+      var fakeWin = {
+        closed: false,
+        close: function() { this.closed = true; },
+        focus: function() {},
+        blur: function() {},
+        postMessage: function(msg, origin) {},
+        location: { href: url, toString: function() { return url; } },
+        document: { write: function(){}, close: function(){} }
+      };
+      
+      window._popups[id] = fakeWin;
+      
+      // Tell React Native to open this URL in a new auth tab
+      if (window.ReactNativeWebView) {
+        window.ReactNativeWebView.postMessage(JSON.stringify({
+          type: 'OPEN_POPUP',
+          url: url,
+          popupId: id
+        }));
+      }
+      
+      return fakeWin;
+    }
+    return _origOpen ? _origOpen.apply(window, arguments) : null;
+  };
 
-  // Block pagehide
-  window.addEventListener('pagehide', function(e) {
-    e.stopImmediatePropagation();
-    e.stopPropagation();
-  }, true);
+  // Listen for auth results relayed back from React Native
+  window.addEventListener('message', function(e) {
+    try {
+      var data = typeof e.data === 'string' ? JSON.parse(e.data) : e.data;
+      if (data && data._fromAuthPopup) {
+        // Re-dispatch as a regular message event with the original auth data
+        // This is what the auth callback would have sent via window.opener.postMessage
+      }
+    } catch(ex) {}
+  });
 
-  // Block freeze event (Chrome)
-  window.addEventListener('freeze', function(e) {
-    e.stopImmediatePropagation();
-    e.stopPropagation();
-  }, true);
+  true;
+})();
+`;
 
+// JS injected into AUTH POPUP tabs - bridges window.opener.postMessage back to main WebView
+const AUTH_POPUP_INJECT_JS = `
+(function() {
+  // Fake window.opener so auth callback can send token back
+  window.opener = {
+    postMessage: function(message, targetOrigin) {
+      if (window.ReactNativeWebView) {
+        window.ReactNativeWebView.postMessage(JSON.stringify({
+          type: 'AUTH_RELAY',
+          message: typeof message === 'string' ? message : JSON.stringify(message),
+          targetOrigin: targetOrigin || '*'
+        }));
+      }
+    },
+    closed: false,
+    location: { href: '${APP_URL}' }
+  };
+  
+  // Also watch for "close this tab" / auth complete messages
+  function checkAuthDone() {
+    var text = document.body ? document.body.innerText : '';
+    var url = window.location.href || '';
+    if (text.indexOf('close this tab') !== -1 || 
+        text.indexOf('close this window') !== -1 || 
+        text.indexOf('Please close this') !== -1 ||
+        text.indexOf('successfully authenticated') !== -1 ||
+        url.indexOf('approval') !== -1) {
+      if (window.ReactNativeWebView) {
+        window.ReactNativeWebView.postMessage(JSON.stringify({type: 'AUTH_DONE'}));
+      }
+    }
+  }
+  setInterval(checkAuthDone, 1500);
+  setTimeout(checkAuthDone, 1000);
+  if (typeof MutationObserver !== 'undefined' && document.body) {
+    new MutationObserver(checkAuthDone).observe(document, {childList: true, subtree: true, characterData: true});
+  }
+  
   true;
 })();
 `;
@@ -273,7 +345,7 @@ export default function ColabApp() {
   // ============================================
   const saveState = useCallback(async () => {
     try {
-      const persistTabs = tabs.map(t => ({...t}));
+      const persistTabs = tabs.filter(t => !t.isPopup).map(t => ({id: t.id, url: t.url, title: t.title}));
       const state: AppSavedState = {
         tabs: persistTabs.length > 0 ? persistTabs : [{ id: '1', url: APP_URL, title: APP_NAME }],
         activeTabId: persistTabs.find(t => t.id === activeTabId) ? activeTabId : (persistTabs[0]?.id || '1'),
@@ -436,11 +508,16 @@ export default function ColabApp() {
   useEffect(() => {
     if (Platform.OS !== 'android') return;
     const handler = BackHandler.addEventListener('hardwareBackPress', () => {
+      const activeTab = tabs.find(t => t.id === activeTabId);
+      if (activeTab?.isPopup && activeTab?.parentTabId) {
+        closePopupTab(activeTabId, activeTab.parentTabId, activeTab.popupId);
+        return true;
+      }
       if (canGoBack) { webViewRefs.current[activeTabId]?.goBack(); return true; }
       return false;
     });
     return () => handler.remove();
-  }, [canGoBack, activeTabId]);
+  }, [canGoBack, activeTabId, tabs, closePopupTab]);
 
   // ============================================
   // TAB MANAGEMENT
@@ -461,7 +538,14 @@ export default function ColabApp() {
   // ============================================
   // NAVIGATION
   // ============================================
-  const goBack = () => webViewRefs.current[activeTabId]?.goBack();
+  const goBack = () => {
+    const activeTab = tabs.find(t => t.id === activeTabId);
+    if (activeTab?.isPopup && activeTab?.parentTabId) {
+      closePopupTab(activeTabId, activeTab.parentTabId, activeTab.popupId);
+    } else {
+      webViewRefs.current[activeTabId]?.goBack();
+    }
+  };
   const goForward = () => webViewRefs.current[activeTabId]?.goForward();
   const reload = () => webViewRefs.current[activeTabId]?.reload();
   const goHome = () => webViewRefs.current[activeTabId]?.injectJavaScript(`window.location.href='${APP_URL}';true;`);
@@ -494,28 +578,23 @@ export default function ColabApp() {
   }, [activeTabId]);
 
   // ============================================
-  // HANDLE AUTH NAVIGATION
-  // Auth happens IN the same WebView (not a popup)
-  // Colab redirects back automatically after auth
+  // POPUP TAB MANAGEMENT (for auth flows)
   // ============================================
-  const [isAuthenticating, setIsAuthenticating] = useState(false);
-  
-  const handleNavigationChange = useCallback((nav: WebViewNavigation, tabId: string) => {
-    const url = nav.url || '';
-    // Detect if we're on an auth page
-    const isAuthPage = url.includes('accounts.google.com') || url.includes('oauth') || url.includes('consent.google.com');
-    if (tabId === activeTabId) {
-      setIsAuthenticating(isAuthPage);
-      setCanGoBack(nav.canGoBack);
-      setCanGoForward(nav.canGoForward);
-      setCurrentUrl(nav.url);
-      setCurrentTitle(nav.title || APP_NAME);
+  const closePopupTab = useCallback((popupTabId: string, parentId: string, popupId?: number) => {
+    if (parentId && webViewRefs.current[parentId] && popupId) {
+      webViewRefs.current[parentId]?.injectJavaScript(`
+        if (window._popups && window._popups[${popupId}]) {
+          window._popups[${popupId}].closed = true;
+        }
+        true;
+      `);
     }
-    setTabs(prev => prev.map(t => t.id === tabId ? {...t, title: nav.title || 'Tab', url: nav.url} : t));
-  }, [activeTabId]);
+    setTabs(prev => prev.filter(t => t.id !== popupTabId));
+    setActiveTabId(parentId);
+  }, []);
 
   // ============================================
-  // INJECTED JAVASCRIPT - Full anti-idle + background survival
+  // INJECTED JAVASCRIPT - Anti-idle (for main tabs only)
   // ============================================
   const getInjectedScript = () => `
     (function() {
@@ -604,11 +683,50 @@ export default function ColabApp() {
   const handleMessage = useCallback((event: any, tabId: string) => {
     try {
       const data = JSON.parse(event.nativeEvent.data);
+      
+      // Main WebView requests a popup for auth
+      if (data.type === 'OPEN_POPUP' && data.url) {
+        const popupTab: Tab = {
+          id: 'popup_' + Date.now().toString(),
+          url: data.url,
+          title: 'Authenticating...',
+          isPopup: true,
+          parentTabId: tabId,
+          popupId: data.popupId,
+        };
+        setTabs(prev => [...prev, popupTab]);
+        setActiveTabId(popupTab.id);
+      }
+      
+      // Auth popup relays postMessage from auth callback back to main WebView
+      if (data.type === 'AUTH_RELAY') {
+        const tab = tabs.find(t => t.id === tabId);
+        if (tab?.isPopup && tab?.parentTabId) {
+          webViewRefs.current[tab.parentTabId]?.injectJavaScript(`
+            try {
+              window.postMessage(${JSON.stringify(data.message)}, '${data.targetOrigin || '*'}');
+            } catch(e) {}
+            true;
+          `);
+          setTimeout(() => {
+            closePopupTab(tabId, tab.parentTabId!, tab.popupId);
+          }, 500);
+        }
+      }
+      
+      // Auth popup detected auth completion
+      if (data.type === 'AUTH_DONE') {
+        const tab = tabs.find(t => t.id === tabId);
+        if (tab?.isPopup && tab?.parentTabId) {
+          closePopupTab(tabId, tab.parentTabId, tab.popupId);
+        }
+      }
+      
       if (data.type === 'OPEN_URL' && data.url) {
         webViewRefs.current[activeTabId]?.injectJavaScript(`window.location.href='${data.url}';true;`);
       }
     } catch (e) {}
-  }, [activeTabId]);
+  }, [activeTabId, tabs, closePopupTab]);
 
   // ============================================
   // WEBVIEW PROCESS DEATH HANDLER
@@ -671,10 +789,17 @@ export default function ColabApp() {
       <View style={styles.tabsBar}>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{flex:1}}>
           {tabs.map(tab => (
-            <TouchableOpacity key={tab.id} style={[styles.tab, tab.id === activeTabId && styles.tabActive]} onPress={() => setActiveTabId(tab.id)}>
+            <TouchableOpacity key={tab.id} style={[styles.tab, tab.id === activeTabId && styles.tabActive, tab.isPopup && styles.tabPopup]} onPress={() => setActiveTabId(tab.id)}>
+              {tab.isPopup && <Ionicons name="lock-closed" size={12} color="#F9AB00" style={{marginRight:4}} />}
               <Text style={[styles.tabText, tab.id === activeTabId && styles.tabTextActive]} numberOfLines={1}>{tab.title}</Text>
               {(tabs.length > 1) && (
-                <TouchableOpacity onPress={() => closeTab(tab.id)} style={styles.tabClose}>
+                <TouchableOpacity onPress={() => {
+                  if (tab.isPopup && tab.parentTabId) {
+                    closePopupTab(tab.id, tab.parentTabId, tab.popupId);
+                  } else {
+                    closeTab(tab.id);
+                  }
+                }} style={styles.tabClose}>
                   <Ionicons name="close" size={16} color="#888" />
                 </TouchableOpacity>
               )}
@@ -686,14 +811,6 @@ export default function ColabApp() {
 
       {isLoading && <View style={styles.progressBar}><View style={[styles.progressFill, {width: `${progress*100}%`, backgroundColor: APP_COLOR}]} /></View>}
 
-      {/* Auth banner - shows when WebView is on Google login */}
-      {isAuthenticating && (
-        <View style={styles.authBanner}>
-          <Ionicons name="lock-closed" size={16} color="#F9AB00" />
-          <Text style={styles.authBannerText}>Authenticating with Google — you'll be redirected back automatically</Text>
-        </View>
-      )}
-
       {/* WEBVIEW - All tabs rendered, only active one visible */}
       <View style={styles.webViewContainer}>
         {tabs.map(tab => (
@@ -702,20 +819,30 @@ export default function ColabApp() {
               ref={ref => webViewRefs.current[tab.id] = ref}
               source={{uri: tab.url}}
               style={styles.webView}
-              onNavigationStateChange={(nav) => handleNavigationChange(nav, tab.id)}
+              onNavigationStateChange={(nav) => {
+                if (tab.id === activeTabId) {
+                  setCanGoBack(nav.canGoBack);
+                  setCanGoForward(nav.canGoForward);
+                  setCurrentUrl(nav.url);
+                  setCurrentTitle(nav.title || APP_NAME);
+                }
+                setTabs(prev => prev.map(t => t.id === tab.id ? {...t, title: nav.title || (t.isPopup ? 'Auth' : 'Tab'), url: nav.url} : t));
+              }}
               onLoadStart={() => tab.id === activeTabId && setIsLoading(true)}
               onLoadEnd={() => tab.id === activeTabId && setIsLoading(false)}
               onLoadProgress={({nativeEvent}) => tab.id === activeTabId && setProgress(nativeEvent.progress)}
               
-              // Auth happens IN the same WebView - no popups
+              // window.open is overridden via JS bridge - no native popup handling
               setSupportMultipleWindows={false}
               
               originWhitelist={['*']}
               onShouldStartLoadWithRequest={handleShouldStartLoad}
               onMessage={(e) => handleMessage(e, tab.id)}
               
-              injectedJavaScriptBeforeContentLoaded={EARLY_INJECT_JS}
-              injectedJavaScript={getInjectedScript()}
+              // Main tabs: EARLY_INJECT_JS (with window.open bridge) + anti-idle
+              // Auth popup tabs: AUTH_POPUP_INJECT_JS (with window.opener bridge)
+              injectedJavaScriptBeforeContentLoaded={tab.isPopup ? AUTH_POPUP_INJECT_JS : EARLY_INJECT_JS}
+              injectedJavaScript={tab.isPopup ? '' : getInjectedScript()}
               
               userAgent={desktopMode ? DESKTOP_UA : MOBILE_UA}
               javaScriptEnabled={true}
@@ -740,7 +867,7 @@ export default function ColabApp() {
               renderLoading={() => (
                 <View style={styles.loading}>
                   <ActivityIndicator size="large" color={APP_COLOR} />
-                  <Text style={styles.loadingText}>{isAuthenticating ? 'Authenticating...' : `Loading ${APP_NAME}...`}</Text>
+                  <Text style={styles.loadingText}>{tab.isPopup ? 'Authenticating...' : `Loading ${APP_NAME}...`}</Text>
                 </View>
               )}
             />
@@ -875,14 +1002,13 @@ const styles = StyleSheet.create({
   tabsBar: {flexDirection:'row', backgroundColor:'#252538', borderBottomWidth:1, borderBottomColor:'#2d2d44'},
   tab: {flexDirection:'row', alignItems:'center', paddingHorizontal:16, paddingVertical:10, borderRightWidth:1, borderRightColor:'#2d2d44', maxWidth:150},
   tabActive: {backgroundColor:'#1a1a2e'},
+  tabPopup: {borderBottomWidth:2, borderBottomColor:'#F9AB00'},
   tabText: {color:'#888', fontSize:13, flex:1},
   tabTextActive: {color:'#fff'},
   tabClose: {marginLeft:8, padding:2},
   addTab: {paddingHorizontal:16, justifyContent:'center', alignItems:'center'},
   progressBar: {height:2, backgroundColor:'#2d2d44'},
   progressFill: {height:'100%'},
-  authBanner: {flexDirection:'row', alignItems:'center', backgroundColor:'rgba(249,171,0,0.15)', paddingHorizontal:16, paddingVertical:8, gap:8},
-  authBannerText: {color:'#F9AB00', fontSize:12, flex:1},
   webViewContainer: {flex:1, backgroundColor:'#fff'},
   webViewWrap: {flex:1},
   webView: {flex:1},
