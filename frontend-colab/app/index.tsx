@@ -96,6 +96,7 @@ const EARLY_INJECT_JS = `
   // === POPUP HANDLER: Override window.open for auth flows ===
   window._authPopupId = 0;
   window._authPopups = {};
+  window._authPopupLatest = null;
   
   var _origOpen = window.open;
   window.open = function(url, target, features) {
@@ -107,9 +108,11 @@ const EARLY_INJECT_JS = `
         focus: function() {},
         blur: function() {},
         postMessage: function() {},
-        location: { href: url }
+        location: { href: url },
+        name: target || ''
       };
       window._authPopups[id] = fakeWin;
+      window._authPopupLatest = fakeWin;
       
       // Tell React Native to open this URL in an auth popup
       if (window.ReactNativeWebView) {
@@ -124,21 +127,26 @@ const EARLY_INJECT_JS = `
     return _origOpen ? _origOpen.apply(window, arguments) : null;
   };
 
-  // Listen for auth results relayed back from popup via React Native
-  window.addEventListener('message', function(e) {
+  // Function to receive relayed auth data from React Native
+  window._handleAuthRelay = function(authData, origin) {
     try {
-      var data = typeof e.data === 'string' ? JSON.parse(e.data) : e.data;
-      if (data && data.type === '__AUTH_RELAY__') {
-        // Re-dispatch the original auth message
-        var evt = new MessageEvent('message', {
-          data: data.payload,
-          origin: data.origin || 'https://accounts.google.com',
-          source: window
-        });
-        window.dispatchEvent(evt);
+      var data = typeof authData === 'string' ? JSON.parse(authData) : authData;
+      var popupRef = window._authPopupLatest;
+      
+      // Create a message event that looks like it came from the popup
+      var evt = new Event('message');
+      Object.defineProperty(evt, 'data', { value: data, writable: false });
+      Object.defineProperty(evt, 'origin', { value: origin || 'https://accounts.google.com', writable: false });
+      Object.defineProperty(evt, 'source', { value: popupRef, writable: false });
+      Object.defineProperty(evt, 'ports', { value: [], writable: false });
+      window.dispatchEvent(evt);
+      
+      // Mark popup as closed after relay
+      if (popupRef) {
+        setTimeout(function() { popupRef.closed = true; }, 500);
       }
     } catch(ex) {}
-  });
+  };
 
   true;
 })();
@@ -613,20 +621,13 @@ export default function ColabApp() {
 
   const relayAuthToMain = useCallback((payload: string, origin: string) => {
     if (authParentTabId && webViewRefs.current[authParentTabId]) {
-      const escapedPayload = JSON.stringify(payload);
-      const escapedOrigin = JSON.stringify(origin);
+      const escapedPayload = payload.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+      const escapedOrigin = origin.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
       webViewRefs.current[authParentTabId]?.injectJavaScript(`
         try {
-          // Dispatch as a MessageEvent - this is what Colab expects
-          var evt = new MessageEvent('message', {
-            data: ${escapedPayload},
-            origin: ${escapedOrigin},
-            source: window
-          });
-          window.dispatchEvent(evt);
-          
-          // Also try direct postMessage
-          window.postMessage(${escapedPayload}, '*');
+          if (window._handleAuthRelay) {
+            window._handleAuthRelay('${escapedPayload}', '${escapedOrigin}');
+          }
         } catch(e) {}
         true;
       `);
@@ -657,15 +658,29 @@ export default function ColabApp() {
     } catch (e) {}
   }, [relayAuthToMain, closeAuthPopup]);
 
-  // Monitor auth popup URL for redirects
+  // Monitor auth popup URL for auth codes and redirects
   const handleAuthNavChange = useCallback((navState: WebViewNavigation) => {
     const url = navState.url || '';
-    // If popup redirects back to a colab URL or storagerelay, auth may be done
-    if (url.includes('storagerelay') || url.includes('colab.research.google.com')) {
-      // Give a moment for any postMessage relay, then close
-      setTimeout(() => closeAuthPopup(), 3000);
+    
+    // Try to extract auth code from URL params
+    if (url.includes('approvalCode=') || url.includes('code=')) {
+      try {
+        const urlObj = new URL(url);
+        const code = urlObj.searchParams.get('approvalCode') || urlObj.searchParams.get('code');
+        const state = urlObj.searchParams.get('state') || '';
+        if (code) {
+          const authData = JSON.stringify({code: code, state: state, iss: 'https://accounts.google.com'});
+          relayAuthToMain(authData, 'https://accounts.google.com');
+          setTimeout(() => closeAuthPopup(), 2000);
+        }
+      } catch (e) {}
     }
-  }, [closeAuthPopup]);
+    
+    // If we see storagerelay in URL, give extra time for JS relay then close
+    if (url.includes('storagerelay')) {
+      setTimeout(() => closeAuthPopup(), 5000);
+    }
+  }, [closeAuthPopup, relayAuthToMain]);
 
   // ============================================
   // HANDLE MESSAGES FROM WEBVIEW
