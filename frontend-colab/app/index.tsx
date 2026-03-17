@@ -58,7 +58,7 @@ interface AppSavedState {
   bookmarks: Bookmark[];
 }
 
-// JS injected BEFORE page loads - suppresses dialogs & locks visibility API
+// JS injected BEFORE page loads - suppresses dialogs, locks visibility, handles popups
 const EARLY_INJECT_JS = `
 (function() {
   // Kill beforeunload dialogs completely
@@ -93,9 +93,121 @@ const EARLY_INJECT_JS = `
   window.addEventListener('pagehide', function(e) { e.stopImmediatePropagation(); e.stopPropagation(); }, true);
   window.addEventListener('freeze', function(e) { e.stopImmediatePropagation(); e.stopPropagation(); }, true);
 
+  // === POPUP HANDLER: Override window.open for auth flows ===
+  window._authPopupId = 0;
+  window._authPopups = {};
+  
+  var _origOpen = window.open;
+  window.open = function(url, target, features) {
+    if (url) {
+      var id = ++window._authPopupId;
+      var fakeWin = {
+        closed: false,
+        close: function() { this.closed = true; },
+        focus: function() {},
+        blur: function() {},
+        postMessage: function() {},
+        location: { href: url }
+      };
+      window._authPopups[id] = fakeWin;
+      
+      // Tell React Native to open this URL in an auth popup
+      if (window.ReactNativeWebView) {
+        window.ReactNativeWebView.postMessage(JSON.stringify({
+          type: 'OPEN_AUTH_POPUP',
+          url: url,
+          popupId: id
+        }));
+      }
+      return fakeWin;
+    }
+    return _origOpen ? _origOpen.apply(window, arguments) : null;
+  };
+
+  // Listen for auth results relayed back from popup via React Native
+  window.addEventListener('message', function(e) {
+    try {
+      var data = typeof e.data === 'string' ? JSON.parse(e.data) : e.data;
+      if (data && data.type === '__AUTH_RELAY__') {
+        // Re-dispatch the original auth message
+        var evt = new MessageEvent('message', {
+          data: data.payload,
+          origin: data.origin || 'https://accounts.google.com',
+          source: window
+        });
+        window.dispatchEvent(evt);
+      }
+    } catch(ex) {}
+  });
+
   true;
 })();
 `;
+
+// JS injected into the AUTH POPUP WebView - captures auth data
+const AUTH_POPUP_JS = '(function() {' +
+  'var _sent = false;' +
+  // Fake window.opener.postMessage - capture what the auth page sends
+  'try {' +
+  '  Object.defineProperty(window, "opener", {' +
+  '    get: function() {' +
+  '      return {' +
+  '        postMessage: function(msg, origin) {' +
+  '          if (!_sent) {' +
+  '            _sent = true;' +
+  '            if (window.ReactNativeWebView) {' +
+  '              window.ReactNativeWebView.postMessage(JSON.stringify({' +
+  '                type: "AUTH_RESULT",' +
+  '                payload: typeof msg === "string" ? msg : JSON.stringify(msg),' +
+  '                origin: origin || "*"' +
+  '              }));' +
+  '            }' +
+  '          }' +
+  '        },' +
+  '        closed: false,' +
+  '        location: { href: "https://colab.research.google.com/", origin: "https://colab.research.google.com" }' +
+  '      };' +
+  '    },' +
+  '    configurable: true' +
+  '  });' +
+  '} catch(e) {}' +
+  // Detect "close this tab" message
+  'var _closeSent = false;' +
+  'function checkDone() {' +
+  '  if (_closeSent) return;' +
+  '  var text = document.body ? document.body.innerText : "";' +
+  '  if (text.indexOf("close this tab") !== -1 || ' +
+  '      text.indexOf("close this window") !== -1 || ' +
+  '      text.indexOf("Please close") !== -1 || ' +
+  '      text.indexOf("successfully") !== -1) {' +
+  '    _closeSent = true;' +
+  '    setTimeout(function() {' +
+  '      if (window.ReactNativeWebView) {' +
+  '        window.ReactNativeWebView.postMessage(JSON.stringify({type: "AUTH_CLOSE"}));' +
+  '      }' +
+  '    }, 2000);' +
+  '  }' +
+  '}' +
+  'setInterval(checkDone, 1000);' +
+  // Also watch URL for auth codes
+  'var _lastUrl = "";' +
+  'setInterval(function() {' +
+  '  var url = window.location.href;' +
+  '  if (url !== _lastUrl) {' +
+  '    _lastUrl = url;' +
+  '    if (url.indexOf("code=") !== -1 || url.indexOf("approvalCode") !== -1 || ' +
+  '        url.indexOf("token=") !== -1 || url.indexOf("approval") !== -1) {' +
+  '      if (window.ReactNativeWebView) {' +
+  '        window.ReactNativeWebView.postMessage(JSON.stringify({' +
+  '          type: "AUTH_URL_CODE",' +
+  '          url: url' +
+  '        }));' +
+  '      }' +
+  '    }' +
+  '  }' +
+  '}, 500);' +
+  'true;' +
+  '})();';
 
 export default function ColabApp() {
   const insets = useSafeAreaInsets();
@@ -126,6 +238,13 @@ export default function ColabApp() {
   const [showPermSetup, setShowPermSetup] = useState(false);
   const [permBattery, setPermBattery] = useState(false);
   const [permNotif, setPermNotif] = useState(false);
+  
+  // Auth popup state
+  const [authPopupVisible, setAuthPopupVisible] = useState(false);
+  const [authPopupUrl, setAuthPopupUrl] = useState('');
+  const [authPopupId, setAuthPopupId] = useState(0);
+  const [authParentTabId, setAuthParentTabId] = useState('');
+  const authWebViewRef = useRef<WebView | null>(null);
 
   const statusBarHeight = Platform.OS === 'android' ? StatusBar.currentHeight || 24 : 0;
   const topPadding = Math.max(insets.top, statusBarHeight, 24);
@@ -417,11 +536,12 @@ export default function ColabApp() {
   useEffect(() => {
     if (Platform.OS !== 'android') return;
     const handler = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (authPopupVisible) { closeAuthPopup(); return true; }
       if (canGoBack) { webViewRefs.current[activeTabId]?.goBack(); return true; }
       return false;
     });
     return () => handler.remove();
-  }, [canGoBack, activeTabId]);
+  }, [canGoBack, activeTabId, authPopupVisible]);
 
   // ============================================
   // TAB MANAGEMENT
@@ -475,11 +595,93 @@ export default function ColabApp() {
   }, [activeTabId]);
 
   // ============================================
+  // AUTH POPUP MANAGEMENT
+  // ============================================
+  const closeAuthPopup = useCallback(() => {
+    // Mark the fake popup as closed so Colab's JS knows
+    if (authParentTabId && webViewRefs.current[authParentTabId] && authPopupId) {
+      webViewRefs.current[authParentTabId]?.injectJavaScript(`
+        if (window._authPopups && window._authPopups[${authPopupId}]) {
+          window._authPopups[${authPopupId}].closed = true;
+        }
+        true;
+      `);
+    }
+    setAuthPopupVisible(false);
+    setAuthPopupUrl('');
+  }, [authParentTabId, authPopupId]);
+
+  const relayAuthToMain = useCallback((payload: string, origin: string) => {
+    if (authParentTabId && webViewRefs.current[authParentTabId]) {
+      const escapedPayload = JSON.stringify(payload);
+      const escapedOrigin = JSON.stringify(origin);
+      webViewRefs.current[authParentTabId]?.injectJavaScript(`
+        try {
+          // Dispatch as a MessageEvent - this is what Colab expects
+          var evt = new MessageEvent('message', {
+            data: ${escapedPayload},
+            origin: ${escapedOrigin},
+            source: window
+          });
+          window.dispatchEvent(evt);
+          
+          // Also try direct postMessage
+          window.postMessage(${escapedPayload}, '*');
+        } catch(e) {}
+        true;
+      `);
+    }
+  }, [authParentTabId]);
+
+  // Handle messages from the auth popup WebView
+  const handleAuthPopupMessage = useCallback((event: any) => {
+    try {
+      const data = JSON.parse(event.nativeEvent.data);
+      
+      if (data.type === 'AUTH_RESULT') {
+        // Auth callback sent data via window.opener.postMessage - relay to main
+        relayAuthToMain(data.payload, data.origin || '*');
+        // Wait briefly then close popup
+        setTimeout(() => closeAuthPopup(), 1500);
+      }
+      
+      if (data.type === 'AUTH_CLOSE') {
+        // Page says "close this tab" - auth is done
+        closeAuthPopup();
+      }
+      
+      if (data.type === 'AUTH_URL_CODE') {
+        // Auth code detected in URL - try relaying it
+        relayAuthToMain(JSON.stringify({authUrl: data.url}), 'https://accounts.google.com');
+      }
+    } catch (e) {}
+  }, [relayAuthToMain, closeAuthPopup]);
+
+  // Monitor auth popup URL for redirects
+  const handleAuthNavChange = useCallback((navState: WebViewNavigation) => {
+    const url = navState.url || '';
+    // If popup redirects back to a colab URL or storagerelay, auth may be done
+    if (url.includes('storagerelay') || url.includes('colab.research.google.com')) {
+      // Give a moment for any postMessage relay, then close
+      setTimeout(() => closeAuthPopup(), 3000);
+    }
+  }, [closeAuthPopup]);
+
+  // ============================================
   // HANDLE MESSAGES FROM WEBVIEW
   // ============================================
   const handleMessage = useCallback((event: any, tabId: string) => {
     try {
       const data = JSON.parse(event.nativeEvent.data);
+      
+      // Main WebView requests an auth popup
+      if (data.type === 'OPEN_AUTH_POPUP' && data.url) {
+        setAuthPopupUrl(data.url);
+        setAuthPopupId(data.popupId || 0);
+        setAuthParentTabId(tabId);
+        setAuthPopupVisible(true);
+      }
+      
       if (data.type === 'OPEN_URL' && data.url) {
         webViewRefs.current[activeTabId]?.injectJavaScript(`window.location.href='${data.url}';true;`);
       }
@@ -663,9 +865,17 @@ export default function ColabApp() {
               onLoadEnd={() => tab.id === activeTabId && setIsLoading(false)}
               onLoadProgress={({nativeEvent}) => tab.id === activeTabId && setProgress(nativeEvent.progress)}
               
-              // In-place auth: Google OAuth navigates within this same WebView
-              // No popups or separate WebViews needed
-              setSupportMultipleWindows={false}
+              // Auth popup: window.open intercepted via JS, also handled natively
+              setSupportMultipleWindows={true}
+              onOpenWindow={(syntheticEvent: any) => {
+                const url = syntheticEvent?.nativeEvent?.targetUrl;
+                if (url) {
+                  setAuthPopupUrl(url);
+                  setAuthPopupId(0);
+                  setAuthParentTabId(tab.id);
+                  setAuthPopupVisible(true);
+                }
+              }}
               
               originWhitelist={['*']}
               onShouldStartLoadWithRequest={handleShouldStartLoad}
@@ -750,6 +960,47 @@ export default function ColabApp() {
                 </View>
               )} />
             )}
+          </View>
+        </View>
+      </Modal>
+
+      {/* AUTH POPUP MODAL - 65% height overlay for Google auth */}
+      <Modal visible={authPopupVisible} animationType="slide" transparent>
+        <View style={styles.authOverlay}>
+          <TouchableOpacity style={styles.authOverlayBg} activeOpacity={1} onPress={() => closeAuthPopup()} />
+          <View style={styles.authPopupContainer}>
+            <View style={styles.authPopupHeader}>
+              <Ionicons name="lock-closed" size={16} color={APP_COLOR} />
+              <Text style={styles.authPopupTitle}>Google Authentication</Text>
+              <TouchableOpacity onPress={() => closeAuthPopup()} style={styles.authPopupClose}>
+                <Ionicons name="close" size={22} color="#fff" />
+              </TouchableOpacity>
+            </View>
+            {authPopupUrl ? (
+              <WebView
+                ref={authWebViewRef}
+                source={{uri: authPopupUrl}}
+                style={{flex:1}}
+                injectedJavaScriptBeforeContentLoaded={AUTH_POPUP_JS}
+                onMessage={handleAuthPopupMessage}
+                onNavigationStateChange={handleAuthNavChange}
+                javaScriptEnabled={true}
+                domStorageEnabled={true}
+                thirdPartyCookiesEnabled={true}
+                sharedCookiesEnabled={true}
+                mixedContentMode="always"
+                originWhitelist={['*']}
+                userAgent={DESKTOP_UA}
+                cacheEnabled={true}
+                startInLoadingState={true}
+                renderLoading={() => (
+                  <View style={styles.loading}>
+                    <ActivityIndicator size="large" color={APP_COLOR} />
+                    <Text style={styles.loadingText}>Loading Google Auth...</Text>
+                  </View>
+                )}
+              />
+            ) : null}
           </View>
         </View>
       </Modal>
@@ -865,6 +1116,12 @@ const styles = StyleSheet.create({
   subtitle: {color:'#888', fontSize:16, marginBottom:20},
   btn: {paddingHorizontal:24, paddingVertical:14, borderRadius:12},
   btnText: {color:'#fff', fontSize:16, fontWeight:'600'},
+  authOverlay: {flex:1, backgroundColor:'rgba(0,0,0,0.5)', justifyContent:'flex-end'},
+  authOverlayBg: {flex:0.3},
+  authPopupContainer: {flex:0.7, backgroundColor:'#1a1a2e', borderTopLeftRadius:20, borderTopRightRadius:20, overflow:'hidden'},
+  authPopupHeader: {flexDirection:'row', alignItems:'center', paddingHorizontal:16, paddingVertical:12, backgroundColor:'#252538', borderTopLeftRadius:20, borderTopRightRadius:20, gap:8},
+  authPopupTitle: {color:'#fff', fontSize:15, fontWeight:'600', flex:1},
+  authPopupClose: {width:32, height:32, borderRadius:16, backgroundColor:'#3d3d54', justifyContent:'center', alignItems:'center'},
   permModal: {width:'90%', backgroundColor:'#1e1e36', borderRadius:20, padding:24, maxHeight:'80%'},
   permTitle: {color:'#fff', fontSize:22, fontWeight:'700', marginTop:12, textAlign:'center'},
   permDesc: {color:'#aaa', fontSize:14, textAlign:'center', marginTop:8, lineHeight:20},
