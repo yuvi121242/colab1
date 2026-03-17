@@ -126,21 +126,52 @@ const EARLY_INJECT_JS = `
     return _origOpen ? _origOpen.apply(window, arguments) : null;
   };
 
-  // Function to receive relayed auth data from React Native
+  // Function to receive relayed auth data - tries MULTIPLE relay methods
   window._handleAuthRelay = function(authData, origin) {
     try {
       var data = typeof authData === 'string' ? JSON.parse(authData) : authData;
       var popupRef = window._authPopupLatest;
       
-      var evt = new Event('message');
-      Object.defineProperty(evt, 'data', { value: data, writable: false });
-      Object.defineProperty(evt, 'origin', { value: origin || 'https://accounts.google.com', writable: false });
-      Object.defineProperty(evt, 'source', { value: popupRef, writable: false });
-      Object.defineProperty(evt, 'ports', { value: [], writable: false });
-      window.dispatchEvent(evt);
+      try {
+        var evt1 = new Event('message');
+        Object.defineProperty(evt1, 'data', { value: data, writable: false });
+        Object.defineProperty(evt1, 'origin', { value: origin || 'https://accounts.google.com', writable: false });
+        Object.defineProperty(evt1, 'source', { value: popupRef, writable: false });
+        Object.defineProperty(evt1, 'ports', { value: [], writable: false });
+        window.dispatchEvent(evt1);
+      } catch(e1) {}
+      
+      try { window.postMessage(data, '*'); } catch(e2) {}
+      
+      try {
+        var strData = typeof data === 'string' ? data : JSON.stringify(data);
+        var evt3 = new Event('message');
+        Object.defineProperty(evt3, 'data', { value: strData, writable: false });
+        Object.defineProperty(evt3, 'origin', { value: origin || 'https://accounts.google.com', writable: false });
+        Object.defineProperty(evt3, 'source', { value: popupRef, writable: false });
+        window.dispatchEvent(evt3);
+      } catch(e3) {}
+      
+      try {
+        var channels = ['oauth', 'auth'];
+        channels.forEach(function(ch) {
+          try { var bc = new BroadcastChannel(ch); bc.postMessage(data); bc.close(); } catch(e) {}
+        });
+      } catch(e4) {}
+      
+      try {
+        localStorage.setItem('__google_auth_result__', typeof data === 'string' ? data : JSON.stringify(data));
+        setTimeout(function() { localStorage.removeItem('__google_auth_result__'); }, 1000);
+      } catch(e5) {}
+      
+      try {
+        var customEvt = new CustomEvent('auth_result', { detail: data });
+        window.dispatchEvent(customEvt);
+        document.dispatchEvent(customEvt);
+      } catch(e6) {}
       
       if (popupRef) {
-        setTimeout(function() { popupRef.closed = true; }, 500);
+        setTimeout(function() { popupRef.closed = true; }, 1000);
       }
     } catch(ex) {}
   };
@@ -150,64 +181,142 @@ const EARLY_INJECT_JS = `
 `;
 
 // JS injected into the AUTH POPUP WebView
+// JS injected into the AUTH POPUP WebView - AGGRESSIVE multi-method auth capture
 const AUTH_POPUP_JS = '(function() {' +
   'var _sent = false;' +
+  'function dbg(m) {' +
+  '  if (window.ReactNativeWebView) {' +
+  '    window.ReactNativeWebView.postMessage(JSON.stringify({type:"AUTH_DEBUG",msg:m}));' +
+  '  }' +
+  '}' +
+  'function sendAuth(payload, origin) {' +
+  '  if (_sent) return;' +
+  '  _sent = true;' +
+  '  dbg("SENDING_AUTH:" + (typeof payload === "string" ? payload.substring(0,80) : JSON.stringify(payload).substring(0,80)));' +
+  '  if (window.ReactNativeWebView) {' +
+  '    window.ReactNativeWebView.postMessage(JSON.stringify({' +
+  '      type: "AUTH_RESULT",' +
+  '      payload: typeof payload === "string" ? payload : JSON.stringify(payload),' +
+  '      origin: origin || "*"' +
+  '    }));' +
+  '  }' +
+  '}' +
   'try {' +
   '  Object.defineProperty(window, "opener", {' +
   '    get: function() {' +
   '      return {' +
   '        postMessage: function(msg, origin) {' +
-  '          if (!_sent) {' +
-  '            _sent = true;' +
-  '            if (window.ReactNativeWebView) {' +
-  '              window.ReactNativeWebView.postMessage(JSON.stringify({' +
-  '                type: "AUTH_RESULT",' +
-  '                payload: typeof msg === "string" ? msg : JSON.stringify(msg),' +
-  '                origin: origin || "*"' +
-  '              }));' +
-  '            }' +
-  '          }' +
+  '          dbg("M1_OPENER_PM");' +
+  '          sendAuth(msg, origin);' +
   '        },' +
   '        closed: false,' +
-  '        location: { href: "https://www.kaggle.com/", origin: "https://www.kaggle.com" }' +
+  '        location: { href: "https://www.kaggle.com/", origin: "https://www.kaggle.com" },' +
+  '        frames: [], length: 0, name: ""' +
   '      };' +
   '    },' +
   '    configurable: true' +
   '  });' +
   '} catch(e) {}' +
+  'try {' +
+  '  var _origBC = window.BroadcastChannel;' +
+  '  if (_origBC) {' +
+  '    window.BroadcastChannel = function(name) {' +
+  '      var bc = new _origBC(name);' +
+  '      var _origPost = bc.postMessage.bind(bc);' +
+  '      bc.postMessage = function(msg) {' +
+  '        dbg("M2_BC_POST:" + JSON.stringify(msg).substring(0,80));' +
+  '        sendAuth(msg, "https://accounts.google.com");' +
+  '        return _origPost(msg);' +
+  '      };' +
+  '      return bc;' +
+  '    };' +
+  '  }' +
+  '} catch(e) {}' +
+  'try {' +
+  '  var _origPM = window.postMessage.bind(window);' +
+  '  window.postMessage = function(msg, origin) {' +
+  '    if (typeof msg === "object" || (typeof msg === "string" && (msg.indexOf("code") !== -1 || msg.indexOf("token") !== -1))) {' +
+  '      sendAuth(msg, origin);' +
+  '    }' +
+  '    return _origPM(msg, origin);' +
+  '  };' +
+  '} catch(e) {}' +
+  'var _lastUrl4 = "";' +
+  'setInterval(function() {' +
+  '  try {' +
+  '    var url = window.location.href;' +
+  '    if (url === _lastUrl4) return;' +
+  '    _lastUrl4 = url;' +
+  '    var hash = window.location.hash;' +
+  '    if (hash && hash.length > 1) {' +
+  '      var frag = hash.substring(1);' +
+  '      if (frag.indexOf("code=") !== -1 || frag.indexOf("access_token=") !== -1) {' +
+  '        sendAuth(frag, "https://accounts.google.com");' +
+  '      }' +
+  '    }' +
+  '    if (url.indexOf("code=") !== -1 || url.indexOf("approvalCode") !== -1 || url.indexOf("access_token=") !== -1) {' +
+  '      sendAuth(url, "https://accounts.google.com");' +
+  '    }' +
+  '    if (url.indexOf("storagerelay") !== -1) {' +
+  '      sendAuth(url, "https://accounts.google.com");' +
+  '    }' +
+  '  } catch(e) {}' +
+  '}, 300);' +
+  'function scanDOM() {' +
+  '  try {' +
+  '    var scripts = document.querySelectorAll("script");' +
+  '    for (var i = 0; i < scripts.length; i++) {' +
+  '      var t = scripts[i].textContent || "";' +
+  '      if (t.indexOf("postMessage") !== -1 && (t.indexOf("code") !== -1 || t.indexOf("token") !== -1)) {' +
+  '        var codeMatch = t.match(/["\u0027]code["\u0027]\\s*:\\s*["\u0027]([^"\u0027]+)/);' +
+  '        if (codeMatch) { sendAuth(JSON.stringify({code: codeMatch[1]}), "https://accounts.google.com"); }' +
+  '      }' +
+  '    }' +
+  '  } catch(e) {}' +
+  '}' +
+  'if (typeof MutationObserver !== "undefined") {' +
+  '  document.addEventListener("DOMContentLoaded", function() {' +
+  '    if (document.body) { new MutationObserver(function() { scanDOM(); }).observe(document.body, {childList:true, subtree:true}); }' +
+  '  });' +
+  '}' +
+  'setInterval(scanDOM, 2000);' +
+  'try {' +
+  '  var _origXHR = XMLHttpRequest.prototype.send;' +
+  '  XMLHttpRequest.prototype.send = function(body) {' +
+  '    this.addEventListener("load", function() {' +
+  '      try {' +
+  '        var resp = this.responseText || "";' +
+  '        if (resp.indexOf("access_token") !== -1 || resp.indexOf("auth_code") !== -1) {' +
+  '          sendAuth(resp, "https://accounts.google.com");' +
+  '        }' +
+  '      } catch(e) {}' +
+  '    });' +
+  '    return _origXHR.apply(this, arguments);' +
+  '  };' +
+  '} catch(e) {}' +
   'var _closeSent = false;' +
   'function checkDone() {' +
   '  if (_closeSent) return;' +
   '  var text = document.body ? document.body.innerText : "";' +
-  '  if (text.indexOf("close this tab") !== -1 || ' +
-  '      text.indexOf("close this window") !== -1 || ' +
-  '      text.indexOf("Please close") !== -1 || ' +
-  '      text.indexOf("successfully") !== -1) {' +
+  '  if (text.indexOf("close this tab") !== -1 || text.indexOf("close this window") !== -1 || text.indexOf("Please close") !== -1) {' +
   '    _closeSent = true;' +
   '    setTimeout(function() {' +
   '      if (window.ReactNativeWebView) {' +
   '        window.ReactNativeWebView.postMessage(JSON.stringify({type: "AUTH_CLOSE"}));' +
   '      }' +
-  '    }, 2000);' +
+  '    }, 4000);' +
   '  }' +
   '}' +
-  'setInterval(checkDone, 1000);' +
-  'var _lastUrl = "";' +
-  'setInterval(function() {' +
-  '  var url = window.location.href;' +
-  '  if (url !== _lastUrl) {' +
-  '    _lastUrl = url;' +
-  '    if (url.indexOf("code=") !== -1 || url.indexOf("approvalCode") !== -1 || ' +
-  '        url.indexOf("token=") !== -1 || url.indexOf("approval") !== -1) {' +
-  '      if (window.ReactNativeWebView) {' +
-  '        window.ReactNativeWebView.postMessage(JSON.stringify({' +
-  '          type: "AUTH_URL_CODE",' +
-  '          url: url' +
-  '        }));' +
-  '      }' +
-  '    }' +
+  'setInterval(checkDone, 800);' +
+  'try {' +
+  '  var _origAssign = window.location.assign;' +
+  '  if (_origAssign) {' +
+  '    window.location.assign = function(url) {' +
+  '      if (url.indexOf("storagerelay") !== -1) { sendAuth(url, "https://accounts.google.com"); }' +
+  '      return _origAssign.call(window.location, url);' +
+  '    };' +
   '  }' +
-  '}, 500);' +
+  '} catch(e) {}' +
   'true;' +
   '})();';
 

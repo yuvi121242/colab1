@@ -127,23 +127,66 @@ const EARLY_INJECT_JS = `
     return _origOpen ? _origOpen.apply(window, arguments) : null;
   };
 
-  // Function to receive relayed auth data from React Native
+  // Function to receive relayed auth data from React Native - tries MULTIPLE relay methods
   window._handleAuthRelay = function(authData, origin) {
     try {
       var data = typeof authData === 'string' ? JSON.parse(authData) : authData;
       var popupRef = window._authPopupLatest;
       
-      // Create a message event that looks like it came from the popup
-      var evt = new Event('message');
-      Object.defineProperty(evt, 'data', { value: data, writable: false });
-      Object.defineProperty(evt, 'origin', { value: origin || 'https://accounts.google.com', writable: false });
-      Object.defineProperty(evt, 'source', { value: popupRef, writable: false });
-      Object.defineProperty(evt, 'ports', { value: [], writable: false });
-      window.dispatchEvent(evt);
+      // RELAY 1: MessageEvent with popup source (via Object.defineProperty)
+      try {
+        var evt1 = new Event('message');
+        Object.defineProperty(evt1, 'data', { value: data, writable: false });
+        Object.defineProperty(evt1, 'origin', { value: origin || 'https://accounts.google.com', writable: false });
+        Object.defineProperty(evt1, 'source', { value: popupRef, writable: false });
+        Object.defineProperty(evt1, 'ports', { value: [], writable: false });
+        window.dispatchEvent(evt1);
+      } catch(e1) {}
+      
+      // RELAY 2: Direct window.postMessage
+      try {
+        window.postMessage(data, '*');
+      } catch(e2) {}
+      
+      // RELAY 3: MessageEvent with string data
+      try {
+        var strData = typeof data === 'string' ? data : JSON.stringify(data);
+        var evt3 = new Event('message');
+        Object.defineProperty(evt3, 'data', { value: strData, writable: false });
+        Object.defineProperty(evt3, 'origin', { value: origin || 'https://accounts.google.com', writable: false });
+        Object.defineProperty(evt3, 'source', { value: popupRef, writable: false });
+        window.dispatchEvent(evt3);
+      } catch(e3) {}
+      
+      // RELAY 4: BroadcastChannel
+      try {
+        var channels = ['oauth', 'auth', 'colab_auth', 'google_auth'];
+        channels.forEach(function(ch) {
+          try {
+            var bc = new BroadcastChannel(ch);
+            bc.postMessage(data);
+            bc.close();
+          } catch(e) {}
+        });
+      } catch(e4) {}
+      
+      // RELAY 5: Storage event (set localStorage then remove)
+      try {
+        var storageKey = '__google_auth_result__';
+        localStorage.setItem(storageKey, typeof data === 'string' ? data : JSON.stringify(data));
+        setTimeout(function() { localStorage.removeItem(storageKey); }, 1000);
+      } catch(e5) {}
+      
+      // RELAY 6: Custom event
+      try {
+        var customEvt = new CustomEvent('auth_result', { detail: data });
+        window.dispatchEvent(customEvt);
+        document.dispatchEvent(customEvt);
+      } catch(e6) {}
       
       // Mark popup as closed after relay
       if (popupRef) {
-        setTimeout(function() { popupRef.closed = true; }, 500);
+        setTimeout(function() { popupRef.closed = true; }, 1000);
       }
     } catch(ex) {}
   };
@@ -152,7 +195,7 @@ const EARLY_INJECT_JS = `
 })();
 `;
 
-// JS injected into the AUTH POPUP WebView - captures auth data
+// JS injected into the AUTH POPUP WebView - AGGRESSIVE multi-method auth capture
 const AUTH_POPUP_JS = '(function() {' +
   'var _sent = false;' +
   'function dbg(m) {' +
@@ -160,52 +203,171 @@ const AUTH_POPUP_JS = '(function() {' +
   '    window.ReactNativeWebView.postMessage(JSON.stringify({type:"AUTH_DEBUG",msg:m}));' +
   '  }' +
   '}' +
+  'function sendAuth(payload, origin) {' +
+  '  if (_sent) return;' +
+  '  _sent = true;' +
+  '  dbg("SENDING_AUTH:" + (typeof payload === "string" ? payload.substring(0,80) : JSON.stringify(payload).substring(0,80)));' +
+  '  if (window.ReactNativeWebView) {' +
+  '    window.ReactNativeWebView.postMessage(JSON.stringify({' +
+  '      type: "AUTH_RESULT",' +
+  '      payload: typeof payload === "string" ? payload : JSON.stringify(payload),' +
+  '      origin: origin || "*"' +
+  '    }));' +
+  '  }' +
+  '}' +
+  // === METHOD 1: Fake window.opener.postMessage ===
   'try {' +
   '  Object.defineProperty(window, "opener", {' +
   '    get: function() {' +
   '      return {' +
   '        postMessage: function(msg, origin) {' +
-  '          dbg("OPENER_PM:" + (typeof msg === "string" ? msg.substring(0,100) : JSON.stringify(msg).substring(0,100)));' +
-  '          if (!_sent && window.ReactNativeWebView) {' +
-  '            _sent = true;' +
-  '            window.ReactNativeWebView.postMessage(JSON.stringify({' +
-  '              type: "AUTH_RESULT",' +
-  '              payload: typeof msg === "string" ? msg : JSON.stringify(msg),' +
-  '              origin: origin || "*"' +
-  '            }));' +
-  '          }' +
+  '          dbg("M1_OPENER_PM");' +
+  '          sendAuth(msg, origin);' +
   '        },' +
   '        closed: false,' +
-  '        location: { href: "https://colab.research.google.com/", origin: "https://colab.research.google.com" }' +
+  '        location: { href: "https://colab.research.google.com/", origin: "https://colab.research.google.com" },' +
+  '        frames: [], length: 0, name: ""' +
   '      };' +
   '    },' +
   '    configurable: true' +
   '  });' +
-  '  dbg("OPENER_OK");' +
-  '} catch(e) { dbg("OPENER_FAIL:" + e.message); }' +
+  '  dbg("M1_OK");' +
+  '} catch(e) { dbg("M1_FAIL:" + e.message); }' +
+  // === METHOD 2: Intercept BroadcastChannel ===
+  'try {' +
+  '  var _origBC = window.BroadcastChannel;' +
+  '  if (_origBC) {' +
+  '    window.BroadcastChannel = function(name) {' +
+  '      dbg("M2_BC_CREATE:" + name);' +
+  '      var bc = new _origBC(name);' +
+  '      var _origPost = bc.postMessage.bind(bc);' +
+  '      bc.postMessage = function(msg) {' +
+  '        dbg("M2_BC_POST:" + JSON.stringify(msg).substring(0,80));' +
+  '        sendAuth(msg, "https://accounts.google.com");' +
+  '        return _origPost(msg);' +
+  '      };' +
+  '      return bc;' +
+  '    };' +
+  '    dbg("M2_OK");' +
+  '  }' +
+  '} catch(e) { dbg("M2_FAIL:" + e.message); }' +
+  // === METHOD 3: Intercept window.postMessage ===
+  'try {' +
+  '  var _origPM = window.postMessage.bind(window);' +
+  '  window.postMessage = function(msg, origin) {' +
+  '    dbg("M3_WIN_PM:" + JSON.stringify(msg).substring(0,80));' +
+  '    if (typeof msg === "object" || (typeof msg === "string" && (msg.indexOf("code") !== -1 || msg.indexOf("token") !== -1 || msg.indexOf("auth") !== -1))) {' +
+  '      sendAuth(msg, origin);' +
+  '    }' +
+  '    return _origPM(msg, origin);' +
+  '  };' +
+  '  dbg("M3_OK");' +
+  '} catch(e) { dbg("M3_FAIL:" + e.message); }' +
+  // === METHOD 4: Watch URL for auth codes (hash + query) ===
+  'var _lastUrl4 = "";' +
+  'setInterval(function() {' +
+  '  try {' +
+  '    var url = window.location.href;' +
+  '    if (url === _lastUrl4) return;' +
+  '    _lastUrl4 = url;' +
+  '    dbg("M4_URL:" + url.substring(0,80));' +
+  '    var hash = window.location.hash;' +
+  '    if (hash && hash.length > 1) {' +
+  '      var frag = hash.substring(1);' +
+  '      dbg("M4_HASH:" + frag.substring(0,80));' +
+  '      if (frag.indexOf("code=") !== -1 || frag.indexOf("access_token=") !== -1 || frag.indexOf("authuser") !== -1) {' +
+  '        sendAuth(frag, "https://accounts.google.com");' +
+  '      }' +
+  '    }' +
+  '    if (url.indexOf("code=") !== -1 || url.indexOf("approvalCode") !== -1 || url.indexOf("access_token=") !== -1) {' +
+  '      sendAuth(url, "https://accounts.google.com");' +
+  '    }' +
+  '    if (url.indexOf("storagerelay") !== -1) {' +
+  '      dbg("M4_STORAGERELAY:" + url.substring(0,100));' +
+  '      sendAuth(url, "https://accounts.google.com");' +
+  '    }' +
+  '  } catch(e) {}' +
+  '}, 300);' +
+  // === METHOD 5: MutationObserver to scrape auth code from DOM ===
+  'function scanDOM() {' +
+  '  try {' +
+  '    var scripts = document.querySelectorAll("script");' +
+  '    for (var i = 0; i < scripts.length; i++) {' +
+  '      var t = scripts[i].textContent || "";' +
+  '      if (t.indexOf("postMessage") !== -1 && (t.indexOf("code") !== -1 || t.indexOf("token") !== -1)) {' +
+  '        dbg("M5_SCRIPT_PM:" + t.substring(0,100));' +
+  '        var codeMatch = t.match(/["\u0027]code["\u0027]\\s*:\\s*["\u0027]([^"\u0027]+)/);' +
+  '        if (codeMatch) {' +
+  '          dbg("M5_CODE:" + codeMatch[1].substring(0,40));' +
+  '          sendAuth(JSON.stringify({code: codeMatch[1]}), "https://accounts.google.com");' +
+  '        }' +
+  '      }' +
+  '    }' +
+  '    var inputs = document.querySelectorAll("input[type=hidden], textarea, [data-code], [data-token]");' +
+  '    for (var j = 0; j < inputs.length; j++) {' +
+  '      var v = inputs[j].value || inputs[j].getAttribute("data-code") || inputs[j].getAttribute("data-token") || "";' +
+  '      if (v && v.length > 10) {' +
+  '        dbg("M5_INPUT:" + v.substring(0,40));' +
+  '        sendAuth(JSON.stringify({code: v}), "https://accounts.google.com");' +
+  '      }' +
+  '    }' +
+  '  } catch(e) {}' +
+  '}' +
+  'if (typeof MutationObserver !== "undefined") {' +
+  '  document.addEventListener("DOMContentLoaded", function() {' +
+  '    if (document.body) {' +
+  '      new MutationObserver(function() { scanDOM(); }).observe(document.body, {childList:true, subtree:true});' +
+  '    }' +
+  '  });' +
+  '}' +
+  'setInterval(scanDOM, 2000);' +
+  // === METHOD 6: Intercept XMLHttpRequest for token exchange ===
+  'try {' +
+  '  var _origXHR = XMLHttpRequest.prototype.send;' +
+  '  XMLHttpRequest.prototype.send = function(body) {' +
+  '    this.addEventListener("load", function() {' +
+  '      try {' +
+  '        var resp = this.responseText || "";' +
+  '        if (resp.indexOf("access_token") !== -1 || resp.indexOf("auth_code") !== -1 || resp.indexOf("authorization_code") !== -1) {' +
+  '          dbg("M6_XHR:" + resp.substring(0,80));' +
+  '          sendAuth(resp, "https://accounts.google.com");' +
+  '        }' +
+  '      } catch(e) {}' +
+  '    });' +
+  '    return _origXHR.apply(this, arguments);' +
+  '  };' +
+  '  dbg("M6_OK");' +
+  '} catch(e) { dbg("M6_FAIL:" + e.message); }' +
+  // === METHOD 7: Watch for close text + localStorage events ===
   'var _closeSent = false;' +
   'function checkDone() {' +
   '  if (_closeSent) return;' +
   '  var text = document.body ? document.body.innerText : "";' +
   '  if (text.indexOf("close this tab") !== -1 || text.indexOf("close this window") !== -1 || text.indexOf("Please close") !== -1) {' +
   '    _closeSent = true;' +
-  '    dbg("CLOSE_TEXT");' +
+  '    dbg("M7_CLOSE_TEXT");' +
   '    setTimeout(function() {' +
   '      if (window.ReactNativeWebView) {' +
   '        window.ReactNativeWebView.postMessage(JSON.stringify({type: "AUTH_CLOSE"}));' +
   '      }' +
-  '    }, 3000);' +
+  '    }, 4000);' +
   '  }' +
   '}' +
-  'setInterval(checkDone, 1000);' +
-  'setInterval(function() {' +
-  '  var url = window.location.href;' +
-  '  if (url.indexOf("storagerelay") !== -1) { dbg("SR_URL:" + url); }' +
-  '  if (url.indexOf("approval") !== -1) { dbg("APPR_URL:" + url); }' +
-  '}, 500);' +
-  'var _opm = window.postMessage;' +
-  'window.postMessage = function(m,o) { dbg("WIN_PM:" + JSON.stringify(m).substring(0,100)); return _opm.call(window,m,o); };' +
-  'dbg("JS_LOADED");' +
+  'setInterval(checkDone, 800);' +
+  // === METHOD 8: Intercept navigation via location changes ===
+  'try {' +
+  '  var _origAssign = window.location.assign;' +
+  '  if (_origAssign) {' +
+  '    window.location.assign = function(url) {' +
+  '      dbg("M8_ASSIGN:" + url.substring(0,80));' +
+  '      if (url.indexOf("storagerelay") !== -1) {' +
+  '        sendAuth(url, "https://accounts.google.com");' +
+  '      }' +
+  '      return _origAssign.call(window.location, url);' +
+  '    };' +
+  '  }' +
+  '} catch(e) {}' +
+  'dbg("ALL_METHODS_LOADED");' +
   'true;' +
   '})();';
 
