@@ -146,43 +146,113 @@ const EARLY_INJECT_JS = `
 })();
 `;
 
-// JS injected into AUTH POPUP tabs - bridges window.opener.postMessage back to main WebView
+// JS injected into AUTH POPUP WebView - comprehensive credential bridge
 const AUTH_POPUP_INJECT_JS = `
 (function() {
-  // Fake window.opener so auth callback can send token back
-  window.opener = {
-    postMessage: function(message, targetOrigin) {
-      if (window.ReactNativeWebView) {
-        window.ReactNativeWebView.postMessage(JSON.stringify({
-          type: 'AUTH_RELAY',
-          message: typeof message === 'string' ? message : JSON.stringify(message),
-          targetOrigin: targetOrigin || '*'
-        }));
-      }
-    },
-    closed: false,
-    location: { href: '${APP_URL}' }
-  };
+  var _relayed = false;
   
-  // Also watch for "close this tab" / auth complete messages
+  function relayToMain(message, targetOrigin) {
+    if (_relayed) return; // Only relay once
+    _relayed = true;
+    if (window.ReactNativeWebView) {
+      window.ReactNativeWebView.postMessage(JSON.stringify({
+        type: 'AUTH_RELAY',
+        message: typeof message === 'string' ? message : JSON.stringify(message),
+        targetOrigin: targetOrigin || '*'
+      }));
+    }
+  }
+  
+  // === Method 1: Fake window.opener (standard OAuth popup flow) ===
+  try {
+    Object.defineProperty(window, 'opener', {
+      get: function() {
+        return {
+          postMessage: function(msg, origin) { relayToMain(msg, origin); },
+          closed: false,
+          location: { href: 'https://colab.research.google.com/', origin: 'https://colab.research.google.com' },
+          origin: 'https://colab.research.google.com'
+        };
+      },
+      set: function() {},
+      configurable: true
+    });
+  } catch(e) {
+    window.opener = {
+      postMessage: function(msg, origin) { relayToMain(msg, origin); },
+      closed: false,
+      location: { href: 'https://colab.research.google.com/' }
+    };
+  }
+  
+  // === Method 2: Intercept parent.postMessage ===
+  try {
+    if (window.parent && window.parent !== window) {
+      var origParentPM = window.parent.postMessage;
+      window.parent.postMessage = function(msg, origin) {
+        relayToMain(msg, origin);
+        if (origParentPM) origParentPM.call(window.parent, msg, origin);
+      };
+    }
+  } catch(e) {}
+  
+  // === Method 3: Intercept BroadcastChannel ===
+  try {
+    var OrigBC = window.BroadcastChannel;
+    if (OrigBC) {
+      window.BroadcastChannel = function(name) {
+        var bc = new OrigBC(name);
+        var origPost = bc.postMessage.bind(bc);
+        bc.postMessage = function(msg) {
+          relayToMain(msg, '*');
+          origPost(msg);
+        };
+        return bc;
+      };
+    }
+  } catch(e) {}
+  
+  // === Method 4: Watch for "close this tab" BUT with 3-second delay ===
+  // Don't close instantly - wait for credential relay to complete
+  var _closeSent = false;
   function checkAuthDone() {
+    if (_closeSent) return;
     var text = document.body ? document.body.innerText : '';
-    var url = window.location.href || '';
     if (text.indexOf('close this tab') !== -1 || 
         text.indexOf('close this window') !== -1 || 
         text.indexOf('Please close this') !== -1 ||
-        text.indexOf('successfully authenticated') !== -1 ||
-        url.indexOf('approval') !== -1) {
-      if (window.ReactNativeWebView) {
-        window.ReactNativeWebView.postMessage(JSON.stringify({type: 'AUTH_DONE'}));
-      }
+        text.indexOf('successfully authenticated') !== -1) {
+      _closeSent = true;
+      // Wait 3 seconds to ensure credential relay happened
+      setTimeout(function() {
+        if (window.ReactNativeWebView) {
+          window.ReactNativeWebView.postMessage(JSON.stringify({type: 'AUTH_DONE'}));
+        }
+      }, 3000);
     }
   }
   setInterval(checkAuthDone, 1500);
-  setTimeout(checkAuthDone, 1000);
-  if (typeof MutationObserver !== 'undefined' && document.body) {
-    new MutationObserver(checkAuthDone).observe(document, {childList: true, subtree: true, characterData: true});
+  setTimeout(checkAuthDone, 2000);
+  if (typeof MutationObserver !== 'undefined') {
+    document.addEventListener('DOMContentLoaded', function() {
+      if (document.body) {
+        new MutationObserver(checkAuthDone).observe(document.body, {childList: true, subtree: true, characterData: true});
+      }
+    });
   }
+  
+  // === Method 5: Monitor URL for auth codes ===
+  var _lastUrl = '';
+  setInterval(function() {
+    var url = window.location.href;
+    if (url !== _lastUrl) {
+      _lastUrl = url;
+      // Check if URL contains auth code/token
+      if (url.indexOf('code=') !== -1 || url.indexOf('token=') !== -1 || url.indexOf('approval') !== -1) {
+        relayToMain(JSON.stringify({type: 'auth_code', url: url}), '*');
+      }
+    }
+  }, 500);
   
   true;
 })();
@@ -703,17 +773,29 @@ export default function ColabApp() {
       // Auth callback relays token via window.opener.postMessage
       if (data.type === 'AUTH_RELAY') {
         if (authParentTabId && webViewRefs.current[authParentTabId]) {
+          // Relay the credential message to the main Colab WebView
+          const msg = data.message;
           webViewRefs.current[authParentTabId]?.injectJavaScript(`
             try {
-              window.postMessage(${JSON.stringify(data.message)}, '${data.targetOrigin || '*'}');
+              // Method 1: postMessage (standard)
+              window.postMessage(${JSON.stringify(msg)}, '${data.targetOrigin || '*'}');
+              
+              // Method 2: Dispatch a MessageEvent directly
+              var evt = new MessageEvent('message', {
+                data: ${JSON.stringify(msg)},
+                origin: '${data.targetOrigin || 'https://accounts.google.com'}',
+                source: null
+              });
+              window.dispatchEvent(evt);
             } catch(e) {}
             true;
           `);
         }
-        setTimeout(() => closeAuthPopup(), 500);
+        // Close popup after giving Colab time to process the credential
+        setTimeout(() => closeAuthPopup(), 1500);
       }
       
-      // Auth popup detected "close this tab" / auth completion
+      // Auth done (text "close this tab" detected) - already delayed 3s in JS
       if (data.type === 'AUTH_DONE') {
         closeAuthPopup();
       }
