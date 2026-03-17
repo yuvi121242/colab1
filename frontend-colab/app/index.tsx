@@ -865,17 +865,9 @@ export default function ColabApp() {
               onLoadEnd={() => tab.id === activeTabId && setIsLoading(false)}
               onLoadProgress={({nativeEvent}) => tab.id === activeTabId && setProgress(nativeEvent.progress)}
               
-              // Auth popup: window.open intercepted via JS, also handled natively
-              setSupportMultipleWindows={true}
-              onOpenWindow={(syntheticEvent: any) => {
-                const url = syntheticEvent?.nativeEvent?.targetUrl;
-                if (url) {
-                  setAuthPopupUrl(url);
-                  setAuthPopupId(0);
-                  setAuthParentTabId(tab.id);
-                  setAuthPopupVisible(true);
-                }
-              }}
+              // Popup handling: setSupportMultipleWindows=false prevents external browser
+              // Auth URLs caught by JS window.open override + onShouldStartLoadWithRequest backup
+              setSupportMultipleWindows={false}
               
               originWhitelist={['*']}
               onShouldStartLoadWithRequest={handleShouldStartLoad}
