@@ -38,7 +38,7 @@ const STORAGE_KEY = 'colab_app_state';
 const MOBILE_UA = 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/125.0.0.0 Mobile Safari/537.36';
 const DESKTOP_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125.0.0.0 Safari/537.36';
 
-interface Tab { id: string; url: string; title: string; }
+interface Tab { id: string; url: string; title: string; isPopup?: boolean; parentTabId?: string; }
 interface Bookmark { id: string; title: string; url: string; createdAt: number; }
 interface AppSavedState {
   tabs: Tab[];
@@ -50,6 +50,32 @@ interface AppSavedState {
   showNavBar: boolean;
   bookmarks: Bookmark[];
 }
+
+// JS injected BEFORE page loads - suppresses "are you sure you want to leave" dialogs
+const EARLY_INJECT_JS = `
+(function() {
+  // Kill beforeunload dialogs completely
+  Object.defineProperty(window, 'onbeforeunload', {
+    get: function() { return null; },
+    set: function() {}
+  });
+  window.addEventListener('beforeunload', function(e) {
+    e.stopImmediatePropagation();
+    e.preventDefault();
+    delete e.returnValue;
+  }, true);
+  
+  // Override confirm to auto-accept navigation confirmations
+  var _origConfirm = window.confirm;
+  window.confirm = function(msg) {
+    if (msg && (msg.indexOf('navigate away') !== -1 || msg.indexOf('leave') !== -1 || msg.indexOf('Changes you made') !== -1)) {
+      return true; // Auto-accept navigation
+    }
+    return _origConfirm.call(window, msg);
+  };
+  true;
+})();
+`;
 
 export default function ColabApp() {
   const insets = useSafeAreaInsets();
@@ -80,27 +106,21 @@ export default function ColabApp() {
   const bottomPadding = Math.max(insets.bottom, 10);
 
   // ============================================
-  // STATE PERSISTENCE - Save & Restore everything
+  // STATE PERSISTENCE
   // ============================================
   const saveState = useCallback(async () => {
     try {
+      // Don't save popup tabs - they're temporary
+      const persistTabs = tabs.filter(t => !t.isPopup).map(t => ({...t, isPopup: undefined, parentTabId: undefined}));
       const state: AppSavedState = {
-        tabs,
-        activeTabId,
-        desktopMode,
-        keepAwake,
-        antiIdle,
-        zoomLevel,
-        showNavBar,
-        bookmarks,
+        tabs: persistTabs.length > 0 ? persistTabs : [{ id: '1', url: APP_URL, title: APP_NAME }],
+        activeTabId: persistTabs.find(t => t.id === activeTabId) ? activeTabId : (persistTabs[0]?.id || '1'),
+        desktopMode, keepAwake, antiIdle, zoomLevel, showNavBar, bookmarks,
       };
       await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-    } catch (e) {
-      console.log('[State] Save failed:', e);
-    }
+    } catch (e) {}
   }, [tabs, activeTabId, desktopMode, keepAwake, antiIdle, zoomLevel, showNavBar, bookmarks]);
 
-  // Debounced save - saves 500ms after last state change
   const debouncedSave = useCallback(() => {
     if (saveTimeout.current) clearTimeout(saveTimeout.current);
     saveTimeout.current = setTimeout(() => {
@@ -108,12 +128,8 @@ export default function ColabApp() {
     }, 500);
   }, [saveState]);
 
-  // Auto-save on any state change
-  useEffect(() => {
-    debouncedSave();
-  }, [tabs, activeTabId, desktopMode, keepAwake, antiIdle, zoomLevel, showNavBar, bookmarks, debouncedSave]);
+  useEffect(() => { debouncedSave(); }, [tabs, activeTabId, desktopMode, keepAwake, antiIdle, zoomLevel, showNavBar, bookmarks, debouncedSave]);
 
-  // Load saved state on startup
   useEffect(() => {
     const loadState = async () => {
       try {
@@ -129,29 +145,22 @@ export default function ColabApp() {
           if (state.showNavBar !== undefined) setShowNavBar(state.showNavBar);
           if (state.bookmarks) setBookmarks(state.bookmarks);
         }
-      } catch (e) {
-        console.log('[State] Load failed:', e);
-      }
+      } catch (e) {}
       stateLoaded.current = true;
     };
     loadState();
   }, []);
 
   // ============================================
-  // APP STATE - Save on background, restore on foreground
+  // APP STATE - Save on background
   // ============================================
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (nextAppState: AppStateStatus) => {
       if (nextAppState === 'background' || nextAppState === 'inactive') {
-        // IMMEDIATELY save state when going to background
         saveState();
       }
       if (appState.current.match(/inactive|background/) && nextAppState === 'active') {
-        // App came back - re-activate keep awake
-        if (keepAwake && activateKeepAwakeAsync) {
-          activateKeepAwakeAsync('colab');
-        }
-        // Re-inject focus events
+        if (keepAwake && activateKeepAwakeAsync) activateKeepAwakeAsync('colab');
         if (antiIdle && webViewRefs.current[activeTabId]) {
           webViewRefs.current[activeTabId]?.injectJavaScript(`
             window.dispatchEvent(new Event('focus'));
@@ -166,7 +175,7 @@ export default function ColabApp() {
   }, [keepAwake, antiIdle, activeTabId, saveState]);
 
   // ============================================
-  // BOOKMARKS (uses shared state, auto-saved above)
+  // BOOKMARKS
   // ============================================
   const saveBookmark = async () => {
     const bm: Bookmark = { id: Date.now().toString(), title: currentTitle, url: currentUrl, createdAt: Date.now() };
@@ -192,11 +201,17 @@ export default function ColabApp() {
   useEffect(() => {
     if (Platform.OS !== 'android') return;
     const handler = BackHandler.addEventListener('hardwareBackPress', () => {
+      // If on a popup tab, close it and go back to parent
+      const activeTab = tabs.find(t => t.id === activeTabId);
+      if (activeTab?.isPopup && activeTab?.parentTabId) {
+        closePopupTab(activeTabId, activeTab.parentTabId);
+        return true;
+      }
       if (canGoBack) { webViewRefs.current[activeTabId]?.goBack(); return true; }
       return false;
     });
     return () => handler.remove();
-  }, [canGoBack, activeTabId]);
+  }, [canGoBack, activeTabId, tabs]);
 
   // ============================================
   // TAB MANAGEMENT
@@ -214,10 +229,23 @@ export default function ColabApp() {
     setTabs(newTabs);
   };
 
+  // Close a popup tab and return to parent
+  const closePopupTab = useCallback((popupId: string, parentId: string) => {
+    setTabs(prev => prev.filter(t => t.id !== popupId));
+    setActiveTabId(parentId);
+  }, []);
+
   // ============================================
   // NAVIGATION
   // ============================================
-  const goBack = () => webViewRefs.current[activeTabId]?.goBack();
+  const goBack = () => {
+    const activeTab = tabs.find(t => t.id === activeTabId);
+    if (activeTab?.isPopup && activeTab?.parentTabId) {
+      closePopupTab(activeTabId, activeTab.parentTabId);
+    } else {
+      webViewRefs.current[activeTabId]?.goBack();
+    }
+  };
   const goForward = () => webViewRefs.current[activeTabId]?.goForward();
   const reload = () => webViewRefs.current[activeTabId]?.reload();
   const goHome = () => webViewRefs.current[activeTabId]?.injectJavaScript(`window.location.href='${APP_URL}';true;`);
@@ -231,18 +259,17 @@ export default function ColabApp() {
   }, []);
 
   // ============================================
-  // WEBVIEW URL HANDLING - Keep OAuth INSIDE
+  // WEBVIEW URL HANDLING
   // ============================================
   const handleShouldStartLoad = useCallback((request: any) => {
     const url = request.url || '';
-    if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('about:') || url.startsWith('data:')) {
+    if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('about:') || url.startsWith('data:') || url.startsWith('blob:')) {
       return true;
     }
     if (url.startsWith('intent://')) {
       const fallbackMatch = url.match(/S\.browser_fallback_url=([^;]+)/);
       if (fallbackMatch) {
-        const fallbackUrl = decodeURIComponent(fallbackMatch[1]);
-        webViewRefs.current[activeTabId]?.injectJavaScript(`window.location.href='${fallbackUrl}';true;`);
+        webViewRefs.current[activeTabId]?.injectJavaScript(`window.location.href='${decodeURIComponent(fallbackMatch[1])}';true;`);
       }
       return false;
     }
@@ -250,69 +277,108 @@ export default function ColabApp() {
     return false;
   }, [activeTabId]);
 
+  // ============================================
+  // HANDLE POPUP WINDOWS (OAuth, Google Drive mount)
+  // Opens in a NEW in-app tab, preserving the original Colab page
+  // ============================================
   const handleOpenWindow = useCallback((syntheticEvent: any) => {
-    const { nativeEvent } = syntheticEvent;
-    const url = nativeEvent?.targetUrl;
+    const url = syntheticEvent?.nativeEvent?.targetUrl;
     if (url) {
-      webViewRefs.current[activeTabId]?.injectJavaScript(`window.location.href='${url}';true;`);
+      // Create a new popup tab for OAuth
+      const popupTab: Tab = {
+        id: 'popup_' + Date.now().toString(),
+        url: url,
+        title: 'Authenticating...',
+        isPopup: true,
+        parentTabId: activeTabId,
+      };
+      setTabs(prev => [...prev, popupTab]);
+      setActiveTabId(popupTab.id);
     }
   }, [activeTabId]);
 
   // ============================================
   // INJECTED JAVASCRIPT
   // ============================================
-  const getInjectedScript = () => `
+  const getInjectedScript = (isPopup: boolean = false) => `
     (function() {
-      // Override window.open to stay inside WebView
-      if (!window._openOverridden) {
-        window._openOverridden = true;
-        window.open = function(url, target, features) {
-          if (url) {
-            if (window.ReactNativeWebView) {
-              window.ReactNativeWebView.postMessage(JSON.stringify({type: 'OPEN_URL', url: url}));
-            }
-            window.location.href = url;
-          }
-          return window;
-        };
-      }
-
-      // Anti-idle system
-      if (window._antiIdleTimer) clearTimeout(window._antiIdleTimer);
-      function safeActivity() {
-        var x = Math.floor(Math.random() * window.innerWidth);
-        var y = Math.floor(Math.random() * window.innerHeight);
-        document.dispatchEvent(new MouseEvent('mousemove', {clientX: x, clientY: y, bubbles: true}));
-        window.scrollBy({ top: Math.floor(Math.random() * 50) - 25, behavior: 'smooth' });
-        window.dispatchEvent(new Event('focus'));
-        document.dispatchEvent(new Event('focus'));
-        document.body.dispatchEvent(new MouseEvent('mouseover', {clientX: x, clientY: y, bubbles: true}));
-        window._antiIdleTimer = setTimeout(safeActivity, 30000 + Math.random() * 60000);
-      }
-      if (${antiIdle}) {
-        window._antiIdleTimer = setTimeout(safeActivity, 5000 + Math.random() * 10000);
-      }
-
-      // Viewport
-      var meta = document.querySelector('meta[name="viewport"]') || document.createElement('meta');
-      meta.name = 'viewport';
-      meta.content = ${desktopMode} 
-        ? 'width=1200,initial-scale=0.5,maximum-scale=3,user-scalable=yes' 
-        : 'width=device-width,initial-scale=1,maximum-scale=3,user-scalable=yes';
-      if (!document.querySelector('meta[name="viewport"]')) document.head.appendChild(meta);
+      // Kill beforeunload dialogs
       window.onbeforeunload = null;
+      Object.defineProperty(window, 'onbeforeunload', {
+        get: function() { return null; },
+        set: function() {}
+      });
+      window.addEventListener('beforeunload', function(e) {
+        e.stopImmediatePropagation();
+        e.preventDefault();
+        delete e.returnValue;
+      }, true);
+
+      ${isPopup ? `
+        // POPUP TAB: Watch for "close this tab" message
+        function checkCloseMessage() {
+          var text = document.body ? document.body.innerText : '';
+          if (text.indexOf('close this tab') !== -1 || text.indexOf('close this window') !== -1 || text.indexOf('Please close this') !== -1) {
+            if (window.ReactNativeWebView) {
+              window.ReactNativeWebView.postMessage(JSON.stringify({type: 'CLOSE_POPUP'}));
+            }
+          }
+        }
+        // Check periodically
+        setInterval(checkCloseMessage, 1000);
+        // Also observe DOM changes
+        if (typeof MutationObserver !== 'undefined') {
+          new MutationObserver(checkCloseMessage).observe(document, {childList: true, subtree: true, characterData: true});
+        }
+        // Check immediately after load
+        setTimeout(checkCloseMessage, 500);
+      ` : `
+        // MAIN TAB: Anti-idle + window.open handler
+        if (window._antiIdleTimer) clearTimeout(window._antiIdleTimer);
+        function safeActivity() {
+          var x = Math.floor(Math.random() * window.innerWidth);
+          var y = Math.floor(Math.random() * window.innerHeight);
+          document.dispatchEvent(new MouseEvent('mousemove', {clientX: x, clientY: y, bubbles: true}));
+          window.scrollBy({ top: Math.floor(Math.random() * 50) - 25, behavior: 'smooth' });
+          window.dispatchEvent(new Event('focus'));
+          document.dispatchEvent(new Event('focus'));
+          window._antiIdleTimer = setTimeout(safeActivity, 30000 + Math.random() * 60000);
+        }
+        if (${antiIdle}) {
+          window._antiIdleTimer = setTimeout(safeActivity, 5000 + Math.random() * 10000);
+        }
+
+        // Viewport
+        var meta = document.querySelector('meta[name="viewport"]') || document.createElement('meta');
+        meta.name = 'viewport';
+        meta.content = ${desktopMode} 
+          ? 'width=1200,initial-scale=0.5,maximum-scale=3,user-scalable=yes' 
+          : 'width=device-width,initial-scale=1,maximum-scale=3,user-scalable=yes';
+        if (!document.querySelector('meta[name="viewport"]')) document.head.appendChild(meta);
+      `}
+      
       true;
     })();
   `;
 
-  const handleMessage = useCallback((event: any) => {
+  // ============================================
+  // HANDLE MESSAGES FROM WEBVIEW
+  // ============================================
+  const handleMessage = useCallback((event: any, tabId: string) => {
     try {
       const data = JSON.parse(event.nativeEvent.data);
+      if (data.type === 'CLOSE_POPUP') {
+        // OAuth complete - close popup tab and go back to parent
+        const tab = tabs.find(t => t.id === tabId);
+        if (tab?.isPopup && tab?.parentTabId) {
+          closePopupTab(tabId, tab.parentTabId);
+        }
+      }
       if (data.type === 'OPEN_URL' && data.url) {
         webViewRefs.current[activeTabId]?.injectJavaScript(`window.location.href='${data.url}';true;`);
       }
     } catch (e) {}
-  }, [activeTabId]);
+  }, [activeTabId, tabs, closePopupTab]);
 
   // ============================================
   // WEB FALLBACK
@@ -355,12 +421,24 @@ export default function ColabApp() {
         </View>
       </View>
 
+      {/* TABS BAR */}
       <View style={styles.tabsBar}>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{flex:1}}>
           {tabs.map(tab => (
-            <TouchableOpacity key={tab.id} style={[styles.tab, tab.id === activeTabId && styles.tabActive]} onPress={() => setActiveTabId(tab.id)}>
+            <TouchableOpacity key={tab.id} style={[styles.tab, tab.id === activeTabId && styles.tabActive, tab.isPopup && styles.tabPopup]} onPress={() => setActiveTabId(tab.id)}>
+              {tab.isPopup && <Ionicons name="lock-closed" size={12} color="#F9AB00" style={{marginRight:4}} />}
               <Text style={[styles.tabText, tab.id === activeTabId && styles.tabTextActive]} numberOfLines={1}>{tab.title}</Text>
-              {tabs.length > 1 && <TouchableOpacity onPress={() => closeTab(tab.id)} style={styles.tabClose}><Ionicons name="close" size={16} color="#888" /></TouchableOpacity>}
+              {(tabs.length > 1) && (
+                <TouchableOpacity onPress={() => {
+                  if (tab.isPopup && tab.parentTabId) {
+                    closePopupTab(tab.id, tab.parentTabId);
+                  } else {
+                    closeTab(tab.id);
+                  }
+                }} style={styles.tabClose}>
+                  <Ionicons name="close" size={16} color="#888" />
+                </TouchableOpacity>
+              )}
             </TouchableOpacity>
           ))}
         </ScrollView>
@@ -369,6 +447,7 @@ export default function ColabApp() {
 
       {isLoading && <View style={styles.progressBar}><View style={[styles.progressFill, {width: `${progress*100}%`, backgroundColor: APP_COLOR}]} /></View>}
 
+      {/* WEBVIEW - All tabs rendered but only active one visible */}
       <View style={styles.webViewContainer}>
         {tabs.map(tab => (
           <View key={tab.id} style={[styles.webViewWrap, {display: tab.id === activeTabId ? 'flex' : 'none'}]}>
@@ -382,19 +461,25 @@ export default function ColabApp() {
                   setCanGoForward(nav.canGoForward);
                   setCurrentUrl(nav.url);
                   setCurrentTitle(nav.title || APP_NAME);
-                  // Update tab URL so it persists correctly
-                  setTabs(prev => prev.map(t => t.id === tab.id ? {...t, title: nav.title || 'Tab', url: nav.url} : t));
                 }
+                setTabs(prev => prev.map(t => t.id === tab.id ? {...t, title: nav.title || (t.isPopup ? 'Auth' : 'Tab'), url: nav.url} : t));
               }}
               onLoadStart={() => tab.id === activeTabId && setIsLoading(true)}
               onLoadEnd={() => tab.id === activeTabId && setIsLoading(false)}
               onLoadProgress={({nativeEvent}) => tab.id === activeTabId && setProgress(nativeEvent.progress)}
-              setSupportMultipleWindows={false}
+              
+              // CRITICAL: Allow popups for OAuth but handle them as in-app tabs
+              setSupportMultipleWindows={true}
+              onOpenWindow={handleOpenWindow}
+              
               originWhitelist={['*']}
               onShouldStartLoadWithRequest={handleShouldStartLoad}
-              onOpenWindow={handleOpenWindow}
-              onMessage={handleMessage}
-              injectedJavaScript={getInjectedScript()}
+              onMessage={(e) => handleMessage(e, tab.id)}
+              
+              // Suppress "are you sure you want to leave" BEFORE page loads
+              injectedJavaScriptBeforeContentLoaded={EARLY_INJECT_JS}
+              injectedJavaScript={getInjectedScript(!!tab.isPopup)}
+              
               userAgent={desktopMode ? DESKTOP_UA : MOBILE_UA}
               javaScriptEnabled={true}
               domStorageEnabled={true}
@@ -410,10 +495,11 @@ export default function ColabApp() {
               allowUniversalAccessFromFileURLs={true}
               mediaPlaybackRequiresUserAction={false}
               androidLayerType="hardware"
+              
               renderLoading={() => (
                 <View style={styles.loading}>
                   <ActivityIndicator size="large" color={APP_COLOR} />
-                  <Text style={styles.loadingText}>Loading {APP_NAME}...</Text>
+                  <Text style={styles.loadingText}>{tab.isPopup ? 'Authenticating...' : `Loading ${APP_NAME}...`}</Text>
                 </View>
               )}
             />
@@ -423,7 +509,7 @@ export default function ColabApp() {
 
       {showNavBar && (
         <View style={[styles.navBar, {paddingBottom: bottomPadding}]}>
-          <TouchableOpacity style={[styles.navBtn, !canGoBack && styles.navBtnDisabled]} onPress={goBack} disabled={!canGoBack}><Ionicons name="chevron-back" size={24} color={canGoBack ? "#fff" : "#555"} /></TouchableOpacity>
+          <TouchableOpacity style={styles.navBtn} onPress={goBack}><Ionicons name="chevron-back" size={24} color="#fff" /></TouchableOpacity>
           <TouchableOpacity style={[styles.navBtn, !canGoForward && styles.navBtnDisabled]} onPress={goForward} disabled={!canGoForward}><Ionicons name="chevron-forward" size={24} color={canGoForward ? "#fff" : "#555"} /></TouchableOpacity>
           <TouchableOpacity style={styles.navBtn} onPress={goHome}><Ionicons name="home" size={22} color="#fff" /></TouchableOpacity>
           <TouchableOpacity style={styles.navBtn} onPress={reload}><Ionicons name="refresh" size={22} color="#fff" /></TouchableOpacity>
@@ -483,6 +569,7 @@ const styles = StyleSheet.create({
   tabsBar: {flexDirection:'row', backgroundColor:'#252538', borderBottomWidth:1, borderBottomColor:'#2d2d44'},
   tab: {flexDirection:'row', alignItems:'center', paddingHorizontal:16, paddingVertical:10, borderRightWidth:1, borderRightColor:'#2d2d44', maxWidth:150},
   tabActive: {backgroundColor:'#1a1a2e'},
+  tabPopup: {borderBottomWidth:2, borderBottomColor:'#F9AB00'},
   tabText: {color:'#888', fontSize:13, flex:1},
   tabTextActive: {color:'#fff'},
   tabClose: {marginLeft:8, padding:2},
