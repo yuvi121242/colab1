@@ -15,6 +15,7 @@ import {
   FlatList,
   AppState,
   AppStateStatus,
+  PermissionsAndroid,
 } from 'react-native';
 import { WebView, WebViewNavigation } from 'react-native-webview';
 import { Ionicons } from '@expo/vector-icons';
@@ -24,13 +25,17 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 let activateKeepAwakeAsync: any = null;
 let deactivateKeepAwake: any = null;
 let Audio: any = null;
+let IntentLauncher: any = null;
 
 if (Platform.OS !== 'web') {
   const keepAwake = require('expo-keep-awake');
   activateKeepAwakeAsync = keepAwake.activateKeepAwakeAsync;
   deactivateKeepAwake = keepAwake.deactivateKeepAwake;
   Audio = require('expo-av').Audio;
+  IntentLauncher = require('expo-intent-launcher');
 }
+
+const PERMISSIONS_KEY = 'kaggle_permissions_done';
 
 const APP_URL = 'https://www.kaggle.com/';
 const APP_NAME = 'Kaggle';
@@ -139,10 +144,79 @@ export default function KaggleApp() {
   const [currentTitle, setCurrentTitle] = useState(APP_NAME);
   const [antiIdle, setAntiIdle] = useState(true);
   const [bgActive, setBgActive] = useState(true);
+  const [showPermSetup, setShowPermSetup] = useState(false);
+  const [permBattery, setPermBattery] = useState(false);
+  const [permNotif, setPermNotif] = useState(false);
 
   const statusBarHeight = Platform.OS === 'android' ? StatusBar.currentHeight || 24 : 0;
   const topPadding = Math.max(insets.top, statusBarHeight, 24);
   const bottomPadding = Math.max(insets.bottom, 10);
+
+  // ============================================
+  // PERMISSION SETUP - Request on first launch
+  // ============================================
+  useEffect(() => {
+    if (Platform.OS === 'web') return;
+    const checkPerms = async () => {
+      try {
+        const done = await AsyncStorage.getItem(PERMISSIONS_KEY);
+        if (!done) {
+          setTimeout(() => setShowPermSetup(true), 1500);
+        }
+      } catch (e) {}
+    };
+    checkPerms();
+  }, []);
+
+  const requestBatteryPermission = useCallback(async () => {
+    try {
+      if (Platform.OS === 'android' && IntentLauncher) {
+        await IntentLauncher.startActivityAsync(
+          IntentLauncher.ActivityAction.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+          { data: 'package:com.kaggle.mobile' }
+        );
+        setPermBattery(true);
+      }
+    } catch (e) {
+      try {
+        if (IntentLauncher) {
+          await IntentLauncher.startActivityAsync(
+            IntentLauncher.ActivityAction.IGNORE_BATTERY_OPTIMIZATION_SETTINGS
+          );
+        } else {
+          Linking.openSettings();
+        }
+        setPermBattery(true);
+      } catch (e2) {
+        Linking.openSettings();
+        setPermBattery(true);
+      }
+    }
+  }, []);
+
+  const requestNotificationPermission = useCallback(async () => {
+    try {
+      if (Platform.OS === 'android') {
+        const result = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS,
+          {
+            title: `${APP_NAME} Notifications`,
+            message: 'Allow notifications to keep your session running in the background.',
+            buttonPositive: 'Allow',
+            buttonNegative: 'Skip',
+          }
+        );
+        setPermNotif(true);
+      }
+    } catch (e) {
+      setPermNotif(true);
+    }
+  }, []);
+
+  const finishPermSetup = useCallback(async () => {
+    await AsyncStorage.setItem(PERMISSIONS_KEY, 'done');
+    setShowPermSetup(false);
+  }, []);
 
   // ============================================
   // SILENT AUDIO - Keeps app alive in background
@@ -983,6 +1057,68 @@ export default function KaggleApp() {
           </View>
         </View>
       </Modal>
+
+      {/* PERMISSION SETUP MODAL */}
+      <Modal visible={showPermSetup} animationType="slide" transparent>
+        <View style={styles.overlay}>
+          <View style={styles.permModal}>
+            <View style={{alignItems:'center', marginBottom:20}}>
+              <Ionicons name="settings-outline" size={48} color={APP_COLOR} />
+              <Text style={styles.permTitle}>Setup for Best Experience</Text>
+              <Text style={styles.permDesc}>
+                To keep your Kaggle notebooks running in the background without disconnecting, we need a couple of permissions.
+              </Text>
+            </View>
+
+            {/* Battery Optimization */}
+            <TouchableOpacity
+              style={[styles.permItem, permBattery && styles.permItemDone]}
+              onPress={requestBatteryPermission}
+            >
+              <View style={styles.permItemLeft}>
+                <View style={[styles.permIcon, {backgroundColor: permBattery ? '#4CAF50' : '#20BEFF'}]}>
+                  <Ionicons name={permBattery ? "checkmark" : "battery-charging"} size={22} color="#fff" />
+                </View>
+                <View style={{flex:1}}>
+                  <Text style={styles.permItemTitle}>Disable Battery Optimization</Text>
+                  <Text style={styles.permItemDesc}>Prevents Android from killing the app in background</Text>
+                </View>
+              </View>
+              <Ionicons name={permBattery ? "checkmark-circle" : "chevron-forward"} size={24} color={permBattery ? "#4CAF50" : "#888"} />
+            </TouchableOpacity>
+
+            {/* Notifications */}
+            <TouchableOpacity
+              style={[styles.permItem, permNotif && styles.permItemDone]}
+              onPress={requestNotificationPermission}
+            >
+              <View style={styles.permItemLeft}>
+                <View style={[styles.permIcon, {backgroundColor: permNotif ? '#4CAF50' : '#F9AB00'}]}>
+                  <Ionicons name={permNotif ? "checkmark" : "notifications"} size={22} color="#fff" />
+                </View>
+                <View style={{flex:1}}>
+                  <Text style={styles.permItemTitle}>Allow Notifications</Text>
+                  <Text style={styles.permItemDesc}>Needed for background session alerts</Text>
+                </View>
+              </View>
+              <Ionicons name={permNotif ? "checkmark-circle" : "chevron-forward"} size={24} color={permNotif ? "#4CAF50" : "#888"} />
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[styles.permDoneBtn, {backgroundColor: APP_COLOR}]}
+              onPress={finishPermSetup}
+            >
+              <Text style={styles.permDoneBtnText}>
+                {permBattery && permNotif ? "All Done!" : "Continue Anyway"}
+              </Text>
+            </TouchableOpacity>
+
+            <Text style={styles.permNote}>
+              You can change these later in your phone's Settings app.
+            </Text>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -1031,4 +1167,16 @@ const styles = StyleSheet.create({
   subtitle: {color:'#888', fontSize:16, marginBottom:20},
   btn: {paddingHorizontal:24, paddingVertical:14, borderRadius:12},
   btnText: {color:'#fff', fontSize:16, fontWeight:'600'},
+  permModal: {width:'90%', backgroundColor:'#1e1e36', borderRadius:20, padding:24, maxHeight:'80%'},
+  permTitle: {color:'#fff', fontSize:22, fontWeight:'700', marginTop:12, textAlign:'center'},
+  permDesc: {color:'#aaa', fontSize:14, textAlign:'center', marginTop:8, lineHeight:20},
+  permItem: {flexDirection:'row', alignItems:'center', justifyContent:'space-between', backgroundColor:'#2d2d44', borderRadius:14, padding:16, marginBottom:12},
+  permItemDone: {backgroundColor:'rgba(76,175,80,0.15)', borderWidth:1, borderColor:'#4CAF50'},
+  permItemLeft: {flexDirection:'row', alignItems:'center', flex:1, gap:12},
+  permIcon: {width:44, height:44, borderRadius:22, justifyContent:'center', alignItems:'center'},
+  permItemTitle: {color:'#fff', fontSize:15, fontWeight:'600'},
+  permItemDesc: {color:'#888', fontSize:12, marginTop:2},
+  permDoneBtn: {paddingVertical:16, borderRadius:14, alignItems:'center', marginTop:8},
+  permDoneBtnText: {color:'#fff', fontSize:17, fontWeight:'700'},
+  permNote: {color:'#666', fontSize:12, textAlign:'center', marginTop:12},
 });
