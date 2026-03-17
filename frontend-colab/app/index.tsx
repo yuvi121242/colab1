@@ -196,6 +196,36 @@ export default function ColabApp() {
   }, [keepAwake]);
 
   // ============================================
+  // NATIVE-SIDE ANTI-IDLE: Re-inject activity into ALL tabs periodically
+  // This ensures even if JS timers get killed, activity continues
+  // ============================================
+  useEffect(() => {
+    if (!antiIdle || Platform.OS === 'web') return;
+    const nativeAntiIdle = setInterval(() => {
+      // Inject activity into ALL non-popup tabs (keeps them all alive)
+      tabs.forEach(tab => {
+        if (!tab.isPopup && webViewRefs.current[tab.id]) {
+          webViewRefs.current[tab.id]?.injectJavaScript(`
+            (function() {
+              var x = 200 + Math.floor(Math.random() * 400);
+              var y = 300 + Math.floor(Math.random() * 400);
+              document.dispatchEvent(new MouseEvent('mousemove', {clientX: x, clientY: y, bubbles: true}));
+              window.dispatchEvent(new Event('focus'));
+              document.dispatchEvent(new Event('focus'));
+              try {
+                Object.defineProperty(document, 'hidden', { get: function() { return false; }, configurable: true });
+                Object.defineProperty(document, 'visibilityState', { get: function() { return 'visible'; }, configurable: true });
+              } catch(e) {}
+              true;
+            })();
+          `);
+        }
+      });
+    }, 20000); // Every 20 seconds from native side
+    return () => clearInterval(nativeAntiIdle);
+  }, [antiIdle, tabs]);
+
+  // ============================================
   // BACK BUTTON HANDLER
   // ============================================
   useEffect(() => {
@@ -298,7 +328,7 @@ export default function ColabApp() {
   }, [activeTabId]);
 
   // ============================================
-  // INJECTED JAVASCRIPT
+  // INJECTED JAVASCRIPT - Aggressive anti-idle for hours of use
   // ============================================
   const getInjectedScript = (isPopup: boolean = false) => `
     (function() {
@@ -324,28 +354,130 @@ export default function ColabApp() {
             }
           }
         }
-        // Check periodically
         setInterval(checkCloseMessage, 1000);
-        // Also observe DOM changes
         if (typeof MutationObserver !== 'undefined') {
           new MutationObserver(checkCloseMessage).observe(document, {childList: true, subtree: true, characterData: true});
         }
-        // Check immediately after load
         setTimeout(checkCloseMessage, 500);
       ` : `
-        // MAIN TAB: Anti-idle + window.open handler
-        if (window._antiIdleTimer) clearTimeout(window._antiIdleTimer);
-        function safeActivity() {
-          var x = Math.floor(Math.random() * window.innerWidth);
-          var y = Math.floor(Math.random() * window.innerHeight);
-          document.dispatchEvent(new MouseEvent('mousemove', {clientX: x, clientY: y, bubbles: true}));
-          window.scrollBy({ top: Math.floor(Math.random() * 50) - 25, behavior: 'smooth' });
-          window.dispatchEvent(new Event('focus'));
-          document.dispatchEvent(new Event('focus'));
-          window._antiIdleTimer = setTimeout(safeActivity, 30000 + Math.random() * 60000);
-        }
+        // ====== AGGRESSIVE ANTI-IDLE SYSTEM ======
+        // Keeps Colab alive for hours by simulating real user activity
+        
+        // Clear any previous timers
+        if (window._aiTimers) window._aiTimers.forEach(function(t){ clearInterval(t); clearTimeout(t); });
+        window._aiTimers = [];
+
         if (${antiIdle}) {
-          window._antiIdleTimer = setTimeout(safeActivity, 5000 + Math.random() * 10000);
+          // --- Layer 1: Mouse activity every 15-25 seconds ---
+          window._aiTimers.push(setInterval(function() {
+            var x = 100 + Math.floor(Math.random() * (window.innerWidth - 200));
+            var y = 100 + Math.floor(Math.random() * (window.innerHeight - 200));
+            var events = ['mousemove', 'mouseover', 'mouseenter'];
+            events.forEach(function(type) {
+              document.dispatchEvent(new MouseEvent(type, {clientX: x, clientY: y, bubbles: true, cancelable: true}));
+            });
+            // Also dispatch on body and document element
+            if (document.body) document.body.dispatchEvent(new MouseEvent('mousemove', {clientX: x, clientY: y, bubbles: true}));
+          }, 15000 + Math.random() * 10000));
+
+          // --- Layer 2: Focus + visibility every 20 seconds ---
+          window._aiTimers.push(setInterval(function() {
+            window.dispatchEvent(new Event('focus'));
+            document.dispatchEvent(new Event('focus'));
+            document.dispatchEvent(new Event('visibilitychange'));
+            // Fake document.hidden = false
+            try {
+              Object.defineProperty(document, 'hidden', { value: false, writable: true, configurable: true });
+              Object.defineProperty(document, 'visibilityState', { value: 'visible', writable: true, configurable: true });
+            } catch(e) {}
+          }, 20000));
+
+          // --- Layer 3: Keyboard events every 30 seconds ---
+          window._aiTimers.push(setInterval(function() {
+            var keys = [16, 17, 18, 91]; // Shift, Ctrl, Alt, Meta (harmless)
+            var key = keys[Math.floor(Math.random() * keys.length)];
+            document.dispatchEvent(new KeyboardEvent('keydown', {keyCode: key, bubbles: true}));
+            setTimeout(function() {
+              document.dispatchEvent(new KeyboardEvent('keyup', {keyCode: key, bubbles: true}));
+            }, 50 + Math.random() * 100);
+          }, 30000 + Math.random() * 10000));
+
+          // --- Layer 4: Scroll micro-movements every 45 seconds ---
+          window._aiTimers.push(setInterval(function() {
+            var scrollAmount = Math.floor(Math.random() * 6) - 3; // -3 to +3 pixels
+            window.scrollBy({ top: scrollAmount, behavior: 'smooth' });
+            // Scroll back after a moment to stay in place
+            setTimeout(function() {
+              window.scrollBy({ top: -scrollAmount, behavior: 'smooth' });
+            }, 2000);
+          }, 45000 + Math.random() * 15000));
+
+          // --- Layer 5: Touch events every 25 seconds (for mobile detection) ---
+          window._aiTimers.push(setInterval(function() {
+            var x = 200 + Math.floor(Math.random() * 300);
+            var y = 300 + Math.floor(Math.random() * 400);
+            try {
+              var touch = new Touch({ identifier: 1, target: document.body, clientX: x, clientY: y });
+              document.dispatchEvent(new TouchEvent('touchstart', { touches: [touch], bubbles: true }));
+              setTimeout(function() {
+                document.dispatchEvent(new TouchEvent('touchend', { changedTouches: [touch], bubbles: true }));
+              }, 50);
+            } catch(e) {}
+          }, 25000 + Math.random() * 10000));
+
+          // --- Layer 6: Colab-specific - Click on notebook area every 60 seconds ---
+          window._aiTimers.push(setInterval(function() {
+            // Try to click on the notebook content area (not buttons)
+            var cells = document.querySelectorAll('.cell, .codecell, .notebook-cell-list, [role="textbox"]');
+            if (cells.length > 0) {
+              var cell = cells[Math.floor(Math.random() * cells.length)];
+              cell.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+            }
+            // Also try to interact with colab's own elements
+            var colabEl = document.querySelector('#notebook-container, .notebook-content, colab-shaded-scroller');
+            if (colabEl) {
+              colabEl.dispatchEvent(new MouseEvent('mousemove', {clientX: 400, clientY: 400, bubbles: true}));
+            }
+          }, 60000 + Math.random() * 15000));
+
+          // --- Layer 7: Override Colab's idle detection ---
+          // Colab uses document.hidden and visibilityState to detect idle
+          try {
+            Object.defineProperty(document, 'hidden', { get: function() { return false; }, configurable: true });
+            Object.defineProperty(document, 'visibilityState', { get: function() { return 'visible'; }, configurable: true });
+          } catch(e) {}
+
+          // --- Layer 8: Keep WebSocket connections alive ---
+          window._aiTimers.push(setInterval(function() {
+            // Prevent Colab from thinking connection is lost
+            if (navigator.onLine !== undefined) {
+              try {
+                Object.defineProperty(navigator, 'onLine', { get: function() { return true; }, configurable: true });
+              } catch(e) {}
+            }
+            // Dispatch online event
+            window.dispatchEvent(new Event('online'));
+          }, 30000));
+
+          // --- Layer 9: Override setTimeout/setInterval idle detectors ---
+          // Some sites use long setTimeout to detect idle - we intercept and reset them
+          if (!window._idleOverrideApplied) {
+            window._idleOverrideApplied = true;
+            var origSetTimeout = window.setTimeout;
+            window.setTimeout = function(fn, delay) {
+              // If it looks like an idle timeout (>= 5 minutes), reduce it
+              if (delay >= 300000) {
+                delay = Math.max(delay, 600000); // Let it run but we'll keep faking activity
+              }
+              return origSetTimeout.apply(window, arguments);
+            };
+          }
+
+          // --- Layer 10: Heartbeat logger ---
+          window._aiTimers.push(setInterval(function() {
+            console.log('[AntiIdle] Heartbeat - ' + new Date().toLocaleTimeString() + ' - Active for ' + Math.round((Date.now() - (window._aiStartTime || Date.now())) / 60000) + ' min');
+          }, 120000));
+          window._aiStartTime = window._aiStartTime || Date.now();
         }
 
         // Viewport

@@ -38,7 +38,7 @@ const STORAGE_KEY = 'kaggle_app_state';
 const MOBILE_UA = 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/125.0.0.0 Mobile Safari/537.36';
 const DESKTOP_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125.0.0.0 Safari/537.36';
 
-interface Tab { id: string; url: string; title: string; }
+interface Tab { id: string; url: string; title: string; isPopup?: boolean; parentTabId?: string; }
 interface Bookmark { id: string; title: string; url: string; createdAt: number; }
 interface AppSavedState {
   tabs: Tab[];
@@ -50,6 +50,32 @@ interface AppSavedState {
   showNavBar: boolean;
   bookmarks: Bookmark[];
 }
+
+// JS injected BEFORE page loads - suppresses "are you sure you want to leave" dialogs
+const EARLY_INJECT_JS = `
+(function() {
+  // Kill beforeunload dialogs completely
+  Object.defineProperty(window, 'onbeforeunload', {
+    get: function() { return null; },
+    set: function() {}
+  });
+  window.addEventListener('beforeunload', function(e) {
+    e.stopImmediatePropagation();
+    e.preventDefault();
+    delete e.returnValue;
+  }, true);
+  
+  // Override confirm to auto-accept navigation confirmations
+  var _origConfirm = window.confirm;
+  window.confirm = function(msg) {
+    if (msg && (msg.indexOf('navigate away') !== -1 || msg.indexOf('leave') !== -1 || msg.indexOf('Changes you made') !== -1)) {
+      return true; // Auto-accept navigation
+    }
+    return _origConfirm.call(window, msg);
+  };
+  true;
+})();
+`;
 
 export default function KaggleApp() {
   const insets = useSafeAreaInsets();
@@ -84,8 +110,12 @@ export default function KaggleApp() {
   // ============================================
   const saveState = useCallback(async () => {
     try {
+      // Don't save popup tabs - they're temporary
+      const persistTabs = tabs.filter(t => !t.isPopup).map(t => ({...t, isPopup: undefined, parentTabId: undefined}));
       const state: AppSavedState = {
-        tabs, activeTabId, desktopMode, keepAwake, antiIdle, zoomLevel, showNavBar, bookmarks,
+        tabs: persistTabs.length > 0 ? persistTabs : [{ id: '1', url: APP_URL, title: APP_NAME }],
+        activeTabId: persistTabs.find(t => t.id === activeTabId) ? activeTabId : (persistTabs[0]?.id || '1'),
+        desktopMode, keepAwake, antiIdle, zoomLevel, showNavBar, bookmarks,
       };
       await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(state));
     } catch (e) {}
@@ -157,20 +187,65 @@ export default function KaggleApp() {
     setBookmarks(prev => prev.filter(b => b.id !== id));
   };
 
+  // ============================================
+  // KEEP AWAKE
+  // ============================================
   useEffect(() => {
     if (Platform.OS !== 'web' && keepAwake && activateKeepAwakeAsync) activateKeepAwakeAsync('kaggle');
     return () => { if (Platform.OS !== 'web' && deactivateKeepAwake) deactivateKeepAwake('kaggle'); };
   }, [keepAwake]);
 
+  // ============================================
+  // NATIVE-SIDE ANTI-IDLE: Re-inject activity into ALL tabs periodically
+  // This ensures even if JS timers get killed, activity continues
+  // ============================================
+  useEffect(() => {
+    if (!antiIdle || Platform.OS === 'web') return;
+    const nativeAntiIdle = setInterval(() => {
+      // Inject activity into ALL non-popup tabs (keeps them all alive)
+      tabs.forEach(tab => {
+        if (!tab.isPopup && webViewRefs.current[tab.id]) {
+          webViewRefs.current[tab.id]?.injectJavaScript(`
+            (function() {
+              var x = 200 + Math.floor(Math.random() * 400);
+              var y = 300 + Math.floor(Math.random() * 400);
+              document.dispatchEvent(new MouseEvent('mousemove', {clientX: x, clientY: y, bubbles: true}));
+              window.dispatchEvent(new Event('focus'));
+              document.dispatchEvent(new Event('focus'));
+              try {
+                Object.defineProperty(document, 'hidden', { get: function() { return false; }, configurable: true });
+                Object.defineProperty(document, 'visibilityState', { get: function() { return 'visible'; }, configurable: true });
+              } catch(e) {}
+              true;
+            })();
+          `);
+        }
+      });
+    }, 20000); // Every 20 seconds from native side
+    return () => clearInterval(nativeAntiIdle);
+  }, [antiIdle, tabs]);
+
+  // ============================================
+  // BACK BUTTON HANDLER
+  // ============================================
   useEffect(() => {
     if (Platform.OS !== 'android') return;
     const handler = BackHandler.addEventListener('hardwareBackPress', () => {
+      // If on a popup tab, close it and go back to parent
+      const activeTab = tabs.find(t => t.id === activeTabId);
+      if (activeTab?.isPopup && activeTab?.parentTabId) {
+        closePopupTab(activeTabId, activeTab.parentTabId);
+        return true;
+      }
       if (canGoBack) { webViewRefs.current[activeTabId]?.goBack(); return true; }
       return false;
     });
     return () => handler.remove();
-  }, [canGoBack, activeTabId]);
+  }, [canGoBack, activeTabId, tabs]);
 
+  // ============================================
+  // TAB MANAGEMENT
+  // ============================================
   const addTab = () => {
     const t: Tab = { id: Date.now().toString(), url: APP_URL, title: 'New Tab' };
     setTabs(prev => [...prev, t]);
@@ -184,7 +259,23 @@ export default function KaggleApp() {
     setTabs(newTabs);
   };
 
-  const goBack = () => webViewRefs.current[activeTabId]?.goBack();
+  // Close a popup tab and return to parent
+  const closePopupTab = useCallback((popupId: string, parentId: string) => {
+    setTabs(prev => prev.filter(t => t.id !== popupId));
+    setActiveTabId(parentId);
+  }, []);
+
+  // ============================================
+  // NAVIGATION
+  // ============================================
+  const goBack = () => {
+    const activeTab = tabs.find(t => t.id === activeTabId);
+    if (activeTab?.isPopup && activeTab?.parentTabId) {
+      closePopupTab(activeTabId, activeTab.parentTabId);
+    } else {
+      webViewRefs.current[activeTabId]?.goBack();
+    }
+  };
   const goForward = () => webViewRefs.current[activeTabId]?.goForward();
   const reload = () => webViewRefs.current[activeTabId]?.reload();
   const goHome = () => webViewRefs.current[activeTabId]?.injectJavaScript(`window.location.href='${APP_URL}';true;`);
@@ -197,9 +288,14 @@ export default function KaggleApp() {
     if (Platform.OS === 'android') Linking.openSettings();
   }, []);
 
+  // ============================================
+  // WEBVIEW URL HANDLING
+  // ============================================
   const handleShouldStartLoad = useCallback((request: any) => {
     const url = request.url || '';
-    if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('about:') || url.startsWith('data:')) return true;
+    if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('about:') || url.startsWith('data:') || url.startsWith('blob:')) {
+      return true;
+    }
     if (url.startsWith('intent://')) {
       const fallbackMatch = url.match(/S\.browser_fallback_url=([^;]+)/);
       if (fallbackMatch) {
@@ -211,51 +307,214 @@ export default function KaggleApp() {
     return false;
   }, [activeTabId]);
 
+  // ============================================
+  // HANDLE POPUP WINDOWS (OAuth, Google login)
+  // Opens in a NEW in-app tab, preserving the original Kaggle page
+  // ============================================
   const handleOpenWindow = useCallback((syntheticEvent: any) => {
     const url = syntheticEvent?.nativeEvent?.targetUrl;
-    if (url) webViewRefs.current[activeTabId]?.injectJavaScript(`window.location.href='${url}';true;`);
+    if (url) {
+      // Create a new popup tab for OAuth
+      const popupTab: Tab = {
+        id: 'popup_' + Date.now().toString(),
+        url: url,
+        title: 'Authenticating...',
+        isPopup: true,
+        parentTabId: activeTabId,
+      };
+      setTabs(prev => [...prev, popupTab]);
+      setActiveTabId(popupTab.id);
+    }
   }, [activeTabId]);
 
-  const getInjectedScript = () => `
+  // ============================================
+  // INJECTED JAVASCRIPT - Aggressive anti-idle for hours of use
+  // ============================================
+  const getInjectedScript = (isPopup: boolean = false) => `
     (function() {
-      if (!window._openOverridden) {
-        window._openOverridden = true;
-        window.open = function(url, target, features) {
-          if (url) {
-            if (window.ReactNativeWebView) window.ReactNativeWebView.postMessage(JSON.stringify({type:'OPEN_URL',url:url}));
-            window.location.href = url;
-          }
-          return window;
-        };
-      }
-      if (window._antiIdleTimer) clearTimeout(window._antiIdleTimer);
-      function safeActivity() {
-        var x = Math.floor(Math.random() * window.innerWidth);
-        var y = Math.floor(Math.random() * window.innerHeight);
-        document.dispatchEvent(new MouseEvent('mousemove', {clientX: x, clientY: y, bubbles: true}));
-        window.scrollBy({ top: Math.floor(Math.random() * 50) - 25, behavior: 'smooth' });
-        window.dispatchEvent(new Event('focus'));
-        document.dispatchEvent(new Event('focus'));
-        document.body.dispatchEvent(new MouseEvent('mouseover', {clientX: x, clientY: y, bubbles: true}));
-        window._antiIdleTimer = setTimeout(safeActivity, 30000 + Math.random() * 60000);
-      }
-      if (${antiIdle}) { window._antiIdleTimer = setTimeout(safeActivity, 5000 + Math.random() * 10000); }
-      var meta = document.querySelector('meta[name="viewport"]') || document.createElement('meta');
-      meta.name = 'viewport';
-      meta.content = ${desktopMode} ? 'width=1200,initial-scale=0.5,maximum-scale=3,user-scalable=yes' : 'width=device-width,initial-scale=1,maximum-scale=3,user-scalable=yes';
-      if (!document.querySelector('meta[name="viewport"]')) document.head.appendChild(meta);
+      // Kill beforeunload dialogs
       window.onbeforeunload = null;
+      Object.defineProperty(window, 'onbeforeunload', {
+        get: function() { return null; },
+        set: function() {}
+      });
+      window.addEventListener('beforeunload', function(e) {
+        e.stopImmediatePropagation();
+        e.preventDefault();
+        delete e.returnValue;
+      }, true);
+
+      ${isPopup ? `
+        // POPUP TAB: Watch for "close this tab" message
+        function checkCloseMessage() {
+          var text = document.body ? document.body.innerText : '';
+          if (text.indexOf('close this tab') !== -1 || text.indexOf('close this window') !== -1 || text.indexOf('Please close this') !== -1) {
+            if (window.ReactNativeWebView) {
+              window.ReactNativeWebView.postMessage(JSON.stringify({type: 'CLOSE_POPUP'}));
+            }
+          }
+        }
+        setInterval(checkCloseMessage, 1000);
+        if (typeof MutationObserver !== 'undefined') {
+          new MutationObserver(checkCloseMessage).observe(document, {childList: true, subtree: true, characterData: true});
+        }
+        setTimeout(checkCloseMessage, 500);
+      ` : `
+        // ====== AGGRESSIVE ANTI-IDLE SYSTEM ======
+        // Keeps Kaggle alive for hours by simulating real user activity
+        
+        // Clear any previous timers
+        if (window._aiTimers) window._aiTimers.forEach(function(t){ clearInterval(t); clearTimeout(t); });
+        window._aiTimers = [];
+
+        if (${antiIdle}) {
+          // --- Layer 1: Mouse activity every 15-25 seconds ---
+          window._aiTimers.push(setInterval(function() {
+            var x = 100 + Math.floor(Math.random() * (window.innerWidth - 200));
+            var y = 100 + Math.floor(Math.random() * (window.innerHeight - 200));
+            var events = ['mousemove', 'mouseover', 'mouseenter'];
+            events.forEach(function(type) {
+              document.dispatchEvent(new MouseEvent(type, {clientX: x, clientY: y, bubbles: true, cancelable: true}));
+            });
+            // Also dispatch on body and document element
+            if (document.body) document.body.dispatchEvent(new MouseEvent('mousemove', {clientX: x, clientY: y, bubbles: true}));
+          }, 15000 + Math.random() * 10000));
+
+          // --- Layer 2: Focus + visibility every 20 seconds ---
+          window._aiTimers.push(setInterval(function() {
+            window.dispatchEvent(new Event('focus'));
+            document.dispatchEvent(new Event('focus'));
+            document.dispatchEvent(new Event('visibilitychange'));
+            // Fake document.hidden = false
+            try {
+              Object.defineProperty(document, 'hidden', { value: false, writable: true, configurable: true });
+              Object.defineProperty(document, 'visibilityState', { value: 'visible', writable: true, configurable: true });
+            } catch(e) {}
+          }, 20000));
+
+          // --- Layer 3: Keyboard events every 30 seconds ---
+          window._aiTimers.push(setInterval(function() {
+            var keys = [16, 17, 18, 91]; // Shift, Ctrl, Alt, Meta (harmless)
+            var key = keys[Math.floor(Math.random() * keys.length)];
+            document.dispatchEvent(new KeyboardEvent('keydown', {keyCode: key, bubbles: true}));
+            setTimeout(function() {
+              document.dispatchEvent(new KeyboardEvent('keyup', {keyCode: key, bubbles: true}));
+            }, 50 + Math.random() * 100);
+          }, 30000 + Math.random() * 10000));
+
+          // --- Layer 4: Scroll micro-movements every 45 seconds ---
+          window._aiTimers.push(setInterval(function() {
+            var scrollAmount = Math.floor(Math.random() * 6) - 3; // -3 to +3 pixels
+            window.scrollBy({ top: scrollAmount, behavior: 'smooth' });
+            // Scroll back after a moment to stay in place
+            setTimeout(function() {
+              window.scrollBy({ top: -scrollAmount, behavior: 'smooth' });
+            }, 2000);
+          }, 45000 + Math.random() * 15000));
+
+          // --- Layer 5: Touch events every 25 seconds (for mobile detection) ---
+          window._aiTimers.push(setInterval(function() {
+            var x = 200 + Math.floor(Math.random() * 300);
+            var y = 300 + Math.floor(Math.random() * 400);
+            try {
+              var touch = new Touch({ identifier: 1, target: document.body, clientX: x, clientY: y });
+              document.dispatchEvent(new TouchEvent('touchstart', { touches: [touch], bubbles: true }));
+              setTimeout(function() {
+                document.dispatchEvent(new TouchEvent('touchend', { changedTouches: [touch], bubbles: true }));
+              }, 50);
+            } catch(e) {}
+          }, 25000 + Math.random() * 10000));
+
+          // --- Layer 6: Kaggle-specific - Click on content area every 60 seconds ---
+          window._aiTimers.push(setInterval(function() {
+            // Try to click on the notebook/content area (not buttons)
+            var cells = document.querySelectorAll('.cell, .kaggle-markdown, .rendered_html, [role="textbox"], .site-content');
+            if (cells.length > 0) {
+              var cell = cells[Math.floor(Math.random() * cells.length)];
+              cell.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+            }
+            // Also try to interact with Kaggle's own elements
+            var kaggleEl = document.querySelector('.site-content, #site-content, [class*="notebook"]');
+            if (kaggleEl) {
+              kaggleEl.dispatchEvent(new MouseEvent('mousemove', {clientX: 400, clientY: 400, bubbles: true}));
+            }
+          }, 60000 + Math.random() * 15000));
+
+          // --- Layer 7: Override Kaggle's idle detection ---
+          // Sites use document.hidden and visibilityState to detect idle
+          try {
+            Object.defineProperty(document, 'hidden', { get: function() { return false; }, configurable: true });
+            Object.defineProperty(document, 'visibilityState', { get: function() { return 'visible'; }, configurable: true });
+          } catch(e) {}
+
+          // --- Layer 8: Keep WebSocket connections alive ---
+          window._aiTimers.push(setInterval(function() {
+            // Prevent site from thinking connection is lost
+            if (navigator.onLine !== undefined) {
+              try {
+                Object.defineProperty(navigator, 'onLine', { get: function() { return true; }, configurable: true });
+              } catch(e) {}
+            }
+            // Dispatch online event
+            window.dispatchEvent(new Event('online'));
+          }, 30000));
+
+          // --- Layer 9: Override setTimeout/setInterval idle detectors ---
+          // Some sites use long setTimeout to detect idle - we intercept and reset them
+          if (!window._idleOverrideApplied) {
+            window._idleOverrideApplied = true;
+            var origSetTimeout = window.setTimeout;
+            window.setTimeout = function(fn, delay) {
+              // If it looks like an idle timeout (>= 5 minutes), reduce it
+              if (delay >= 300000) {
+                delay = Math.max(delay, 600000); // Let it run but we'll keep faking activity
+              }
+              return origSetTimeout.apply(window, arguments);
+            };
+          }
+
+          // --- Layer 10: Heartbeat logger ---
+          window._aiTimers.push(setInterval(function() {
+            console.log('[AntiIdle] Heartbeat - ' + new Date().toLocaleTimeString() + ' - Active for ' + Math.round((Date.now() - (window._aiStartTime || Date.now())) / 60000) + ' min');
+          }, 120000));
+          window._aiStartTime = window._aiStartTime || Date.now();
+        }
+
+        // Viewport
+        var meta = document.querySelector('meta[name="viewport"]') || document.createElement('meta');
+        meta.name = 'viewport';
+        meta.content = ${desktopMode} 
+          ? 'width=1200,initial-scale=0.5,maximum-scale=3,user-scalable=yes' 
+          : 'width=device-width,initial-scale=1,maximum-scale=3,user-scalable=yes';
+        if (!document.querySelector('meta[name="viewport"]')) document.head.appendChild(meta);
+      `}
+      
       true;
     })();
   `;
 
-  const handleMessage = useCallback((event: any) => {
+  // ============================================
+  // HANDLE MESSAGES FROM WEBVIEW
+  // ============================================
+  const handleMessage = useCallback((event: any, tabId: string) => {
     try {
       const data = JSON.parse(event.nativeEvent.data);
-      if (data.type === 'OPEN_URL' && data.url) webViewRefs.current[activeTabId]?.injectJavaScript(`window.location.href='${data.url}';true;`);
+      if (data.type === 'CLOSE_POPUP') {
+        // OAuth complete - close popup tab and go back to parent
+        const tab = tabs.find(t => t.id === tabId);
+        if (tab?.isPopup && tab?.parentTabId) {
+          closePopupTab(tabId, tab.parentTabId);
+        }
+      }
+      if (data.type === 'OPEN_URL' && data.url) {
+        webViewRefs.current[activeTabId]?.injectJavaScript(`window.location.href='${data.url}';true;`);
+      }
     } catch (e) {}
-  }, [activeTabId]);
+  }, [activeTabId, tabs, closePopupTab]);
 
+  // ============================================
+  // WEB FALLBACK
+  // ============================================
   if (Platform.OS === 'web') {
     return (
       <View style={[styles.container, {paddingTop: topPadding}]}>
@@ -272,6 +531,9 @@ export default function KaggleApp() {
     );
   }
 
+  // ============================================
+  // MAIN RENDER
+  // ============================================
   return (
     <View style={styles.container}>
       <StatusBar barStyle="light-content" backgroundColor="#1a1a2e" translucent />
@@ -291,12 +553,24 @@ export default function KaggleApp() {
         </View>
       </View>
 
+      {/* TABS BAR */}
       <View style={styles.tabsBar}>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{flex:1}}>
           {tabs.map(tab => (
-            <TouchableOpacity key={tab.id} style={[styles.tab, tab.id === activeTabId && styles.tabActive]} onPress={() => setActiveTabId(tab.id)}>
+            <TouchableOpacity key={tab.id} style={[styles.tab, tab.id === activeTabId && styles.tabActive, tab.isPopup && styles.tabPopup]} onPress={() => setActiveTabId(tab.id)}>
+              {tab.isPopup && <Ionicons name="lock-closed" size={12} color="#20BEFF" style={{marginRight:4}} />}
               <Text style={[styles.tabText, tab.id === activeTabId && styles.tabTextActive]} numberOfLines={1}>{tab.title}</Text>
-              {tabs.length > 1 && <TouchableOpacity onPress={() => closeTab(tab.id)} style={styles.tabClose}><Ionicons name="close" size={16} color="#888" /></TouchableOpacity>}
+              {(tabs.length > 1) && (
+                <TouchableOpacity onPress={() => {
+                  if (tab.isPopup && tab.parentTabId) {
+                    closePopupTab(tab.id, tab.parentTabId);
+                  } else {
+                    closeTab(tab.id);
+                  }
+                }} style={styles.tabClose}>
+                  <Ionicons name="close" size={16} color="#888" />
+                </TouchableOpacity>
+              )}
             </TouchableOpacity>
           ))}
         </ScrollView>
@@ -305,6 +579,7 @@ export default function KaggleApp() {
 
       {isLoading && <View style={styles.progressBar}><View style={[styles.progressFill, {width: `${progress*100}%`, backgroundColor: APP_COLOR}]} /></View>}
 
+      {/* WEBVIEW - All tabs rendered but only active one visible */}
       <View style={styles.webViewContainer}>
         {tabs.map(tab => (
           <View key={tab.id} style={[styles.webViewWrap, {display: tab.id === activeTabId ? 'flex' : 'none'}]}>
@@ -318,18 +593,25 @@ export default function KaggleApp() {
                   setCanGoForward(nav.canGoForward);
                   setCurrentUrl(nav.url);
                   setCurrentTitle(nav.title || APP_NAME);
-                  setTabs(prev => prev.map(t => t.id === tab.id ? {...t, title: nav.title || 'Tab', url: nav.url} : t));
                 }
+                setTabs(prev => prev.map(t => t.id === tab.id ? {...t, title: nav.title || (t.isPopup ? 'Auth' : 'Tab'), url: nav.url} : t));
               }}
               onLoadStart={() => tab.id === activeTabId && setIsLoading(true)}
               onLoadEnd={() => tab.id === activeTabId && setIsLoading(false)}
               onLoadProgress={({nativeEvent}) => tab.id === activeTabId && setProgress(nativeEvent.progress)}
-              setSupportMultipleWindows={false}
+              
+              // CRITICAL: Allow popups for OAuth but handle them as in-app tabs
+              setSupportMultipleWindows={true}
+              onOpenWindow={handleOpenWindow}
+              
               originWhitelist={['*']}
               onShouldStartLoadWithRequest={handleShouldStartLoad}
-              onOpenWindow={handleOpenWindow}
-              onMessage={handleMessage}
-              injectedJavaScript={getInjectedScript()}
+              onMessage={(e) => handleMessage(e, tab.id)}
+              
+              // Suppress "are you sure you want to leave" BEFORE page loads
+              injectedJavaScriptBeforeContentLoaded={EARLY_INJECT_JS}
+              injectedJavaScript={getInjectedScript(!!tab.isPopup)}
+              
               userAgent={desktopMode ? DESKTOP_UA : MOBILE_UA}
               javaScriptEnabled={true}
               domStorageEnabled={true}
@@ -345,10 +627,11 @@ export default function KaggleApp() {
               allowUniversalAccessFromFileURLs={true}
               mediaPlaybackRequiresUserAction={false}
               androidLayerType="hardware"
+              
               renderLoading={() => (
                 <View style={styles.loading}>
                   <ActivityIndicator size="large" color={APP_COLOR} />
-                  <Text style={styles.loadingText}>Loading {APP_NAME}...</Text>
+                  <Text style={styles.loadingText}>{tab.isPopup ? 'Authenticating...' : `Loading ${APP_NAME}...`}</Text>
                 </View>
               )}
             />
@@ -358,7 +641,7 @@ export default function KaggleApp() {
 
       {showNavBar && (
         <View style={[styles.navBar, {paddingBottom: bottomPadding}]}>
-          <TouchableOpacity style={[styles.navBtn, !canGoBack && styles.navBtnDisabled]} onPress={goBack} disabled={!canGoBack}><Ionicons name="chevron-back" size={24} color={canGoBack ? "#fff" : "#555"} /></TouchableOpacity>
+          <TouchableOpacity style={styles.navBtn} onPress={goBack}><Ionicons name="chevron-back" size={24} color="#fff" /></TouchableOpacity>
           <TouchableOpacity style={[styles.navBtn, !canGoForward && styles.navBtnDisabled]} onPress={goForward} disabled={!canGoForward}><Ionicons name="chevron-forward" size={24} color={canGoForward ? "#fff" : "#555"} /></TouchableOpacity>
           <TouchableOpacity style={styles.navBtn} onPress={goHome}><Ionicons name="home" size={22} color="#fff" /></TouchableOpacity>
           <TouchableOpacity style={styles.navBtn} onPress={reload}><Ionicons name="refresh" size={22} color="#fff" /></TouchableOpacity>
@@ -418,6 +701,7 @@ const styles = StyleSheet.create({
   tabsBar: {flexDirection:'row', backgroundColor:'#252538', borderBottomWidth:1, borderBottomColor:'#2d2d44'},
   tab: {flexDirection:'row', alignItems:'center', paddingHorizontal:16, paddingVertical:10, borderRightWidth:1, borderRightColor:'#2d2d44', maxWidth:150},
   tabActive: {backgroundColor:'#1a1a2e'},
+  tabPopup: {borderBottomWidth:2, borderBottomColor:'#20BEFF'},
   tabText: {color:'#888', fontSize:13, flex:1},
   tabTextActive: {color:'#fff'},
   tabClose: {marginLeft:8, padding:2},

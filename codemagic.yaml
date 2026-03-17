@@ -8,10 +8,10 @@ workflows:
       node: 18
       java: 17
     scripts:
-      - name: Fix dependencies
+      - name: Fix dependencies and code
         script: |
           python3 << 'PYEOF'
-          import json
+          import json, re
           with open('package.json','r') as f: d=json.load(f)
           deps=d.get('dependencies',{})
           deps.pop('expo-background-fetch',None)
@@ -19,53 +19,97 @@ workflows:
           deps['@react-native-async-storage/async-storage']='2.1.0'
           d['dependencies']=deps
           with open('package.json','w') as f: json.dump(d,f,indent=2)
+          with open('app/index.tsx','r') as f: c=f.read()
+          c=re.sub(r'.*expo-task-manager.*\n','',c)
+          c=re.sub(r'.*expo-background-fetch.*\n','',c)
+          with open('app/index.tsx','w') as f: f.write(c)
           PYEOF
-      - name: Create icon images
+
+      - name: Fix icons and app config
         script: |
           pip3 install Pillow
-          mkdir -p assets/images
           python3 << 'PYEOF'
           from PIL import Image
-          import os
+          import os, json
           os.makedirs('assets/images', exist_ok=True)
           img=Image.new('RGBA',(1024,1024),(249,171,0,255))
           img.save('assets/images/icon.png')
           img.save('assets/images/adaptive-icon.png')
           img.save('assets/images/favicon.png')
-          PYEOF
-      - name: Install and fix versions
-        script: |
-          npm install
-          npx expo install expo-font expo-system-ui expo-build-properties
-          npx expo install --fix
-          python3 << 'PYEOF'
-          import json
+          splash=Image.new('RGBA',(1284,2778),(249,171,0,255))
+          splash.save('assets/images/splash.png')
           with open('app.json','r') as f: d=json.load(f)
           plugins=[p for p in d['expo'].get('plugins',[]) if not (isinstance(p,list) and p[0]=='expo-build-properties')]
           plugins.append(['expo-build-properties',{'android':{'kotlinVersion':'1.9.24','compileSdkVersion':35,'targetSdkVersion':34}}])
           d['expo']['plugins']=plugins
           with open('app.json','w') as f: json.dump(d,f,indent=2)
           PYEOF
+
+      - name: Install and fix versions
+        script: |
+          npm install
+          npx expo install expo-font expo-system-ui expo-build-properties
+          npx expo install --fix
+
+      - name: Patch expo-modules-core kotlin version in node_modules
+        script: |
+          python3 << 'PYEOF'
+          import os, re, glob
+          base = 'node_modules/expo-modules-core'
+          count = 0
+          for root, dirs, files in os.walk(base):
+            for fname in files:
+              if fname.endswith('.gradle') or fname.endswith('.gradle.kts') or fname == 'gradle.properties':
+                path = os.path.join(root, fname)
+                with open(path, 'r', errors='ignore') as f:
+                  c = f.read()
+                if '1.9.25' in c:
+                  patched = re.sub(r'1\.9\.25', '1.9.24', c)
+                  with open(path, 'w') as f:
+                    f.write(patched)
+                  print(f"Patched: {path}")
+                  count += 1
+          print(f"Total files patched: {count}")
+          PYEOF
+
       - name: Prebuild Android
         script: |
           rm -rf android
           npx expo prebuild --platform android --clean
+
       - name: Fix Android build config
         script: |
-          echo "android.defaults.buildfeatures.buildconfig=true" >> android/gradle.properties
-          echo "android.nonTransitiveRClass=false" >> android/gradle.properties
           python3 << 'PYEOF'
-          with open('android/app/build.gradle','r') as f: c=f.read()
+          import re, os
+          for path in ['android/settings.gradle', 'android/build.gradle']:
+            if not os.path.exists(path): continue
+            with open(path,'r') as f: c=f.read()
+            with open(path,'w') as f: f.write(re.sub(r'1\.9\.25','1.9.24',c))
+            print(f"Patched {path}")
+          for root, dirs, files in os.walk('android'):
+            for fname in files:
+              if fname.endswith('.gradle') or fname.endswith('.gradle.kts'):
+                path = os.path.join(root, fname)
+                with open(path, 'r', errors='ignore') as f: c = f.read()
+                if '1.9.25' in c:
+                  with open(path, 'w') as f: f.write(re.sub(r'1\.9\.25','1.9.24',c))
+                  print(f"Patched android: {path}")
+          path='android/app/build.gradle'
+          with open(path,'r') as f: c=f.read()
           if 'buildFeatures' not in c:
             c=c.replace('android {','android {\n    buildFeatures {\n        buildConfig = true\n    }',1)
-            with open('android/app/build.gradle','w') as f: f.write(c)
+            with open(path,'w') as f: f.write(c)
+            print("Added buildFeatures")
           PYEOF
+          echo "android.defaults.buildfeatures.buildconfig=true" >> android/gradle.properties
+          echo "android.nonTransitiveRClass=false" >> android/gradle.properties
+
       - name: Build Android
         script: |
           cd android
-          ./gradlew clean assembleRelease
+          ./gradlew assembleRelease
     artifacts:
-      - frontend-colab/android/app/build/outputs/**/*.apk
+      - android/app/build/outputs/**/*.apk
 
   kaggle-android:
     name: Build Kaggle APK
@@ -76,10 +120,10 @@ workflows:
       node: 18
       java: 17
     scripts:
-      - name: Fix dependencies
+      - name: Fix dependencies and code
         script: |
           python3 << 'PYEOF'
-          import json
+          import json, re
           with open('package.json','r') as f: d=json.load(f)
           deps=d.get('dependencies',{})
           deps.pop('expo-background-fetch',None)
@@ -87,50 +131,94 @@ workflows:
           deps['@react-native-async-storage/async-storage']='2.1.0'
           d['dependencies']=deps
           with open('package.json','w') as f: json.dump(d,f,indent=2)
+          with open('app/index.tsx','r') as f: c=f.read()
+          c=re.sub(r'.*expo-task-manager.*\n','',c)
+          c=re.sub(r'.*expo-background-fetch.*\n','',c)
+          with open('app/index.tsx','w') as f: f.write(c)
           PYEOF
-      - name: Create icon images
+
+      - name: Fix icons and app config
         script: |
           pip3 install Pillow
-          mkdir -p assets/images
           python3 << 'PYEOF'
           from PIL import Image
-          import os
+          import os, json
           os.makedirs('assets/images', exist_ok=True)
           img=Image.new('RGBA',(1024,1024),(32,190,255,255))
           img.save('assets/images/icon.png')
           img.save('assets/images/adaptive-icon.png')
           img.save('assets/images/favicon.png')
-          PYEOF
-      - name: Install and fix versions
-        script: |
-          npm install
-          npx expo install expo-font expo-system-ui expo-build-properties
-          npx expo install --fix
-          python3 << 'PYEOF'
-          import json
+          splash=Image.new('RGBA',(1284,2778),(32,190,255,255))
+          splash.save('assets/images/splash.png')
           with open('app.json','r') as f: d=json.load(f)
           plugins=[p for p in d['expo'].get('plugins',[]) if not (isinstance(p,list) and p[0]=='expo-build-properties')]
           plugins.append(['expo-build-properties',{'android':{'kotlinVersion':'1.9.24','compileSdkVersion':35,'targetSdkVersion':34}}])
           d['expo']['plugins']=plugins
           with open('app.json','w') as f: json.dump(d,f,indent=2)
           PYEOF
+
+      - name: Install and fix versions
+        script: |
+          npm install
+          npx expo install expo-font expo-system-ui expo-build-properties
+          npx expo install --fix
+
+      - name: Patch expo-modules-core kotlin version in node_modules
+        script: |
+          python3 << 'PYEOF'
+          import os, re
+          base = 'node_modules/expo-modules-core'
+          count = 0
+          for root, dirs, files in os.walk(base):
+            for fname in files:
+              if fname.endswith('.gradle') or fname.endswith('.gradle.kts') or fname == 'gradle.properties':
+                path = os.path.join(root, fname)
+                with open(path, 'r', errors='ignore') as f:
+                  c = f.read()
+                if '1.9.25' in c:
+                  patched = re.sub(r'1\.9\.25', '1.9.24', c)
+                  with open(path, 'w') as f:
+                    f.write(patched)
+                  print(f"Patched: {path}")
+                  count += 1
+          print(f"Total files patched: {count}")
+          PYEOF
+
       - name: Prebuild Android
         script: |
           rm -rf android
           npx expo prebuild --platform android --clean
+
       - name: Fix Android build config
         script: |
-          echo "android.defaults.buildfeatures.buildconfig=true" >> android/gradle.properties
-          echo "android.nonTransitiveRClass=false" >> android/gradle.properties
           python3 << 'PYEOF'
-          with open('android/app/build.gradle','r') as f: c=f.read()
+          import re, os
+          for path in ['android/settings.gradle', 'android/build.gradle']:
+            if not os.path.exists(path): continue
+            with open(path,'r') as f: c=f.read()
+            with open(path,'w') as f: f.write(re.sub(r'1\.9\.25','1.9.24',c))
+            print(f"Patched {path}")
+          for root, dirs, files in os.walk('android'):
+            for fname in files:
+              if fname.endswith('.gradle') or fname.endswith('.gradle.kts'):
+                path = os.path.join(root, fname)
+                with open(path, 'r', errors='ignore') as f: c = f.read()
+                if '1.9.25' in c:
+                  with open(path, 'w') as f: f.write(re.sub(r'1\.9\.25','1.9.24',c))
+                  print(f"Patched android: {path}")
+          path='android/app/build.gradle'
+          with open(path,'r') as f: c=f.read()
           if 'buildFeatures' not in c:
             c=c.replace('android {','android {\n    buildFeatures {\n        buildConfig = true\n    }',1)
-            with open('android/app/build.gradle','w') as f: f.write(c)
+            with open(path,'w') as f: f.write(c)
+            print("Added buildFeatures")
           PYEOF
+          echo "android.defaults.buildfeatures.buildconfig=true" >> android/gradle.properties
+          echo "android.nonTransitiveRClass=false" >> android/gradle.properties
+
       - name: Build Android
         script: |
           cd android
-          ./gradlew clean assembleRelease
+          ./gradlew assembleRelease
     artifacts:
-      - frontend-kaggle/android/app/build/outputs/**/*.apk
+      - android/app/build/outputs/**/*.apk
