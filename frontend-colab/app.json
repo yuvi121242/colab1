@@ -2,7 +2,7 @@
   "expo": {
     "name": "Colab Mobile",
     "slug": "colab-mobile",
-    "version": "1.0.0",
+    "version": "2.0.0",
     "orientation": "default",
     "icon": "./assets/images/icon.png",
     "scheme": "colabmobile",
@@ -25,6 +25,7 @@
         "foregroundImage": "./assets/images/adaptive-icon.png",
         "backgroundColor": "#F9AB00"
       },
+      "versionCode": 2,
       "package": "com.colab.mobile",
       "permissions": [
         "INTERNET",
