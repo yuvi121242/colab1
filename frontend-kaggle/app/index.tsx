@@ -707,39 +707,77 @@ export default function KaggleApp() {
     try {
       const data = JSON.parse(event.nativeEvent.data);
       if (data.type === 'AUTH_RESULT') {
-        relayAuthToMain(data.payload, data.origin || '*');
-        setTimeout(() => closeAuthPopup(), 1500);
+        relayAuthToMain(data.payload, data.origin || 'https://accounts.google.com');
+        setTimeout(() => closeAuthPopup(), 2000);
       }
       if (data.type === 'AUTH_CLOSE') {
         closeAuthPopup();
       }
-      if (data.type === 'AUTH_URL_CODE') {
-        relayAuthToMain(JSON.stringify({authUrl: data.url}), 'https://accounts.google.com');
-      }
     } catch (e) {}
   }, [relayAuthToMain, closeAuthPopup]);
 
-  const handleAuthNavChange = useCallback((navState: any) => {
-    const url = navState.url || '';
-    
-    // Try to extract auth code from URL params
-    if (url.includes('approvalCode=') || url.includes('code=')) {
-      try {
+  const extractAuthFromUrl = useCallback((url: string): string | null => {
+    try {
+      if (url.includes('storagerelay://')) {
+        const hashIdx = url.indexOf('#');
+        if (hashIdx !== -1) {
+          const fragment = url.substring(hashIdx + 1);
+          return decodeURIComponent(fragment);
+        }
+        const qIdx = url.indexOf('?');
+        if (qIdx !== -1) {
+          const params = new URLSearchParams(url.substring(qIdx + 1));
+          const response = params.get('response');
+          if (response) return decodeURIComponent(response);
+        }
+      }
+      if (url.includes('approval') || url.includes('code=')) {
         const urlObj = new URL(url);
         const code = urlObj.searchParams.get('approvalCode') || urlObj.searchParams.get('code');
         const state = urlObj.searchParams.get('state') || '';
         if (code) {
-          const authData = JSON.stringify({code: code, state: state, iss: 'https://accounts.google.com'});
-          relayAuthToMain(authData, 'https://accounts.google.com');
-          setTimeout(() => closeAuthPopup(), 2000);
+          return JSON.stringify({code: code, state: state, iss: 'https://accounts.google.com'});
         }
-      } catch (e) {}
+        if (url.includes('#')) {
+          const hash = url.substring(url.indexOf('#') + 1);
+          const hashParams = new URLSearchParams(hash);
+          const hashCode = hashParams.get('code') || hashParams.get('access_token');
+          if (hashCode) {
+            return JSON.stringify({code: hashCode, state: hashParams.get('state') || '', iss: 'https://accounts.google.com'});
+          }
+        }
+      }
+    } catch (e) {}
+    return null;
+  }, []);
+
+  const handleAuthShouldStartLoad = useCallback((request: any) => {
+    const url = request.url || '';
+    if (url.startsWith('storagerelay://')) {
+      const authData = extractAuthFromUrl(url);
+      if (authData) {
+        relayAuthToMain(authData, 'https://accounts.google.com');
+        setTimeout(() => closeAuthPopup(), 2000);
+      } else {
+        relayAuthToMain(JSON.stringify({storageRelayUrl: url}), 'https://accounts.google.com');
+        setTimeout(() => closeAuthPopup(), 3000);
+      }
+      return false;
     }
-    
-    if (url.includes('storagerelay')) {
-      setTimeout(() => closeAuthPopup(), 5000);
+    if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('about:') || url.startsWith('data:')) {
+      return true;
     }
-  }, [closeAuthPopup, relayAuthToMain]);
+    return false;
+  }, [extractAuthFromUrl, relayAuthToMain, closeAuthPopup]);
+
+  const handleAuthNavChange = useCallback((navState: any) => {
+    const url = navState.url || '';
+    const authData = extractAuthFromUrl(url);
+    if (authData) {
+      relayAuthToMain(authData, 'https://accounts.google.com');
+      setTimeout(() => closeAuthPopup(), 2000);
+    }
+  }, [extractAuthFromUrl, relayAuthToMain, closeAuthPopup]);
 
   // ============================================
   // HANDLE MESSAGES FROM MAIN WEBVIEW
@@ -965,6 +1003,7 @@ export default function KaggleApp() {
                 injectedJavaScriptBeforeContentLoaded={AUTH_POPUP_JS}
                 onMessage={handleAuthPopupMessage}
                 onNavigationStateChange={handleAuthNavChange}
+                onShouldStartLoadWithRequest={handleAuthShouldStartLoad}
                 javaScriptEnabled={true}
                 domStorageEnabled={true}
                 thirdPartyCookiesEnabled={true}
@@ -973,6 +1012,7 @@ export default function KaggleApp() {
                 originWhitelist={['*']}
                 userAgent={DESKTOP_UA}
                 cacheEnabled={true}
+                setSupportMultipleWindows={false}
                 startInLoadingState={true}
                 renderLoading={() => (
                   <View style={styles.loading}>

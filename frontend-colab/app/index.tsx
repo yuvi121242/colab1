@@ -641,46 +641,95 @@ export default function ColabApp() {
       
       if (data.type === 'AUTH_RESULT') {
         // Auth callback sent data via window.opener.postMessage - relay to main
-        relayAuthToMain(data.payload, data.origin || '*');
-        // Wait briefly then close popup
-        setTimeout(() => closeAuthPopup(), 1500);
+        relayAuthToMain(data.payload, data.origin || 'https://accounts.google.com');
+        setTimeout(() => closeAuthPopup(), 2000);
       }
       
       if (data.type === 'AUTH_CLOSE') {
-        // Page says "close this tab" - auth is done
         closeAuthPopup();
-      }
-      
-      if (data.type === 'AUTH_URL_CODE') {
-        // Auth code detected in URL - try relaying it
-        relayAuthToMain(JSON.stringify({authUrl: data.url}), 'https://accounts.google.com');
       }
     } catch (e) {}
   }, [relayAuthToMain, closeAuthPopup]);
 
-  // Monitor auth popup URL for auth codes and redirects
-  const handleAuthNavChange = useCallback((navState: WebViewNavigation) => {
-    const url = navState.url || '';
-    
-    // Try to extract auth code from URL params
-    if (url.includes('approvalCode=') || url.includes('code=')) {
-      try {
+  // Parse auth response from storagerelay or approval URLs
+  const extractAuthFromUrl = useCallback((url: string): string | null => {
+    try {
+      // storagerelay://ORIGIN?ID#ENCODED_RESPONSE
+      if (url.includes('storagerelay://')) {
+        // The hash fragment contains the auth response
+        const hashIdx = url.indexOf('#');
+        if (hashIdx !== -1) {
+          const fragment = url.substring(hashIdx + 1);
+          const decoded = decodeURIComponent(fragment);
+          return decoded; // This should be the auth response JSON
+        }
+        // Also check query params
+        const qIdx = url.indexOf('?');
+        if (qIdx !== -1) {
+          const params = new URLSearchParams(url.substring(qIdx + 1));
+          const response = params.get('response');
+          if (response) return decodeURIComponent(response);
+        }
+      }
+      
+      // approval URL with code in params
+      if (url.includes('approval') || url.includes('code=')) {
         const urlObj = new URL(url);
         const code = urlObj.searchParams.get('approvalCode') || urlObj.searchParams.get('code');
         const state = urlObj.searchParams.get('state') || '';
         if (code) {
-          const authData = JSON.stringify({code: code, state: state, iss: 'https://accounts.google.com'});
-          relayAuthToMain(authData, 'https://accounts.google.com');
-          setTimeout(() => closeAuthPopup(), 2000);
+          return JSON.stringify({code: code, state: state, iss: 'https://accounts.google.com'});
         }
-      } catch (e) {}
+        // Check hash fragment too
+        if (url.includes('#')) {
+          const hash = url.substring(url.indexOf('#') + 1);
+          const hashParams = new URLSearchParams(hash);
+          const hashCode = hashParams.get('code') || hashParams.get('access_token');
+          if (hashCode) {
+            return JSON.stringify({code: hashCode, state: hashParams.get('state') || '', iss: 'https://accounts.google.com'});
+          }
+        }
+      }
+    } catch (e) {}
+    return null;
+  }, []);
+
+  // Intercept ALL URL requests in the popup (including storagerelay://)
+  const handleAuthShouldStartLoad = useCallback((request: any) => {
+    const url = request.url || '';
+    
+    // Catch storagerelay:// protocol - this is Google's auth relay mechanism
+    if (url.startsWith('storagerelay://')) {
+      const authData = extractAuthFromUrl(url);
+      if (authData) {
+        relayAuthToMain(authData, 'https://accounts.google.com');
+        setTimeout(() => closeAuthPopup(), 2000);
+      } else {
+        // Even without parsed data, relay the raw URL
+        relayAuthToMain(JSON.stringify({storageRelayUrl: url}), 'https://accounts.google.com');
+        setTimeout(() => closeAuthPopup(), 3000);
+      }
+      return false; // Block navigation - WebView can't load storagerelay://
     }
     
-    // If we see storagerelay in URL, give extra time for JS relay then close
-    if (url.includes('storagerelay')) {
-      setTimeout(() => closeAuthPopup(), 5000);
+    // Allow all http/https URLs
+    if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('about:') || url.startsWith('data:')) {
+      return true;
     }
-  }, [closeAuthPopup, relayAuthToMain]);
+    
+    return false;
+  }, [extractAuthFromUrl, relayAuthToMain, closeAuthPopup]);
+
+  // Monitor auth popup URL for auth codes in regular http navigation
+  const handleAuthNavChange = useCallback((navState: WebViewNavigation) => {
+    const url = navState.url || '';
+    
+    const authData = extractAuthFromUrl(url);
+    if (authData) {
+      relayAuthToMain(authData, 'https://accounts.google.com');
+      setTimeout(() => closeAuthPopup(), 2000);
+    }
+  }, [extractAuthFromUrl, relayAuthToMain, closeAuthPopup]);
 
   // ============================================
   // HANDLE MESSAGES FROM WEBVIEW
@@ -991,6 +1040,7 @@ export default function ColabApp() {
                 injectedJavaScriptBeforeContentLoaded={AUTH_POPUP_JS}
                 onMessage={handleAuthPopupMessage}
                 onNavigationStateChange={handleAuthNavChange}
+                onShouldStartLoadWithRequest={handleAuthShouldStartLoad}
                 javaScriptEnabled={true}
                 domStorageEnabled={true}
                 thirdPartyCookiesEnabled={true}
@@ -999,6 +1049,7 @@ export default function ColabApp() {
                 originWhitelist={['*']}
                 userAgent={DESKTOP_UA}
                 cacheEnabled={true}
+                setSupportMultipleWindows={false}
                 startInLoadingState={true}
                 renderLoading={() => (
                   <View style={styles.loading}>
