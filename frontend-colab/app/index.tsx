@@ -18,6 +18,7 @@ import {
   PermissionsAndroid,
 } from 'react-native';
 import { WebView, WebViewNavigation } from 'react-native-webview';
+import * as Clipboard from 'expo-clipboard';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -408,6 +409,20 @@ export default function ColabApp() {
   const [authParentTabId, setAuthParentTabId] = useState('');
   const authWebViewRef = useRef<WebView | null>(null);
   const [authDebugLog, setAuthDebugLog] = useState<string[]>([]);
+  const [showDebugPanel, setShowDebugPanel] = useState(false);
+  
+  const addDebug = useCallback((source: string, msg: string) => {
+    const ts = new Date().toLocaleTimeString('en', {hour12: false, hour:'2-digit', minute:'2-digit', second:'2-digit'});
+    const entry = `[${ts}][${source}] ${msg}`;
+    console.log(entry);
+    setAuthDebugLog(prev => [...prev, entry]);
+  }, []);
+  
+  const copyDebugLog = useCallback(async () => {
+    const text = authDebugLog.join('\n');
+    await Clipboard.setStringAsync(text);
+    Alert.alert('Copied', 'Debug log copied to clipboard (' + authDebugLog.length + ' entries)');
+  }, [authDebugLog]);
 
   const statusBarHeight = Platform.OS === 'android' ? StatusBar.currentHeight || 24 : 0;
   const topPadding = Math.max(insets.top, statusBarHeight, 24);
@@ -761,7 +776,7 @@ export default function ColabApp() {
   // AUTH POPUP MANAGEMENT
   // ============================================
   const closeAuthPopup = useCallback(() => {
-    // Mark the fake popup as closed so Colab's JS knows
+    addDebug('MAIN', 'Closing popup, marking fake window as closed');
     if (authParentTabId && webViewRefs.current[authParentTabId] && authPopupId) {
       webViewRefs.current[authParentTabId]?.injectJavaScript(`
         if (window._authPopups && window._authPopups[${authPopupId}]) {
@@ -772,9 +787,10 @@ export default function ColabApp() {
     }
     setAuthPopupVisible(false);
     setAuthPopupUrl('');
-  }, [authParentTabId, authPopupId]);
+  }, [authParentTabId, authPopupId, addDebug]);
 
   const relayAuthToMain = useCallback((payload: string, origin: string) => {
+    addDebug('RELAY', 'Sending to main: ' + payload.substring(0, 80) + '...');
     if (authParentTabId && webViewRefs.current[authParentTabId]) {
       const escapedPayload = payload.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
       const escapedOrigin = origin.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
@@ -786,8 +802,11 @@ export default function ColabApp() {
         } catch(e) {}
         true;
       `);
+      addDebug('RELAY', '_handleAuthRelay injected into main WebView');
+    } else {
+      addDebug('RELAY', 'ERROR: No parent tab ref!');
     }
-  }, [authParentTabId]);
+  }, [authParentTabId, addDebug]);
 
   // Handle messages from the auth popup WebView
   const handleAuthPopupMessage = useCallback((event: any) => {
@@ -795,24 +814,25 @@ export default function ColabApp() {
       const data = JSON.parse(event.nativeEvent.data);
       
       if (data.type === 'AUTH_DEBUG') {
-        console.log('[AUTH_DEBUG]', data.msg);
-        setAuthDebugLog(prev => [...prev.slice(-10), data.msg]);
+        addDebug('POPUP', data.msg);
       }
       
       if (data.type === 'AUTH_RESULT') {
-        console.log('[AUTH_RESULT]', data.payload?.substring(0, 200));
-        setAuthDebugLog(prev => [...prev.slice(-10), 'RESULT_RECEIVED']);
+        addDebug('POPUP', 'AUTH_RESULT received! payload=' + (data.payload || '').substring(0, 80));
+        addDebug('RELAY', 'Attempting relay to main WebView...');
         relayAuthToMain(data.payload, data.origin || 'https://accounts.google.com');
-        setTimeout(() => closeAuthPopup(), 2000);
+        setTimeout(() => {
+          addDebug('MAIN', 'Auto-closing popup after AUTH_RESULT relay');
+          closeAuthPopup();
+        }, 2000);
       }
       
       if (data.type === 'AUTH_CLOSE') {
-        console.log('[AUTH_CLOSE]');
-        setAuthDebugLog(prev => [...prev.slice(-10), 'CLOSING']);
+        addDebug('POPUP', 'AUTH_CLOSE - "close this tab" detected');
         closeAuthPopup();
       }
     } catch (e) {}
-  }, [relayAuthToMain, closeAuthPopup]);
+  }, [relayAuthToMain, closeAuthPopup, addDebug]);
 
   // Parse auth response from storagerelay or approval URLs
   const extractAuthFromUrl = useCallback((url: string): string | null => {
@@ -860,46 +880,44 @@ export default function ColabApp() {
   // Intercept ALL URL requests in the popup (including storagerelay://)
   const handleAuthShouldStartLoad = useCallback((request: any) => {
     const url = request.url || '';
+    addDebug('POPUP_NAV', url.substring(0, 80));
     
-    // Log all navigation for debugging
-    console.log('[AUTH_NAV]', url.substring(0, 100));
-    setAuthDebugLog(prev => [...prev.slice(-10), 'NAV:' + url.substring(0, 60)]);
-    
-    // Catch storagerelay:// protocol - this is Google's auth relay mechanism
+    // Catch storagerelay:// protocol
     if (url.startsWith('storagerelay://')) {
-      console.log('[STORAGERELAY]', url);
-      setAuthDebugLog(prev => [...prev.slice(-10), 'STORAGERELAY_CAUGHT!']);
+      addDebug('POPUP_NAV', '*** STORAGERELAY CAUGHT! ***');
       const authData = extractAuthFromUrl(url);
       if (authData) {
-        setAuthDebugLog(prev => [...prev.slice(-10), 'DATA_EXTRACTED:' + authData.substring(0, 60)]);
+        addDebug('POPUP_NAV', 'Extracted data: ' + authData.substring(0, 80));
         relayAuthToMain(authData, 'https://accounts.google.com');
         setTimeout(() => closeAuthPopup(), 2000);
       } else {
-        // Relay the raw URL
+        addDebug('POPUP_NAV', 'Could not parse storagerelay, relaying raw URL');
         relayAuthToMain(JSON.stringify({storageRelayUrl: url}), 'https://accounts.google.com');
         setTimeout(() => closeAuthPopup(), 3000);
       }
-      return false; // Block navigation - WebView can't load storagerelay://
+      return false;
     }
     
-    // Allow all http/https URLs
     if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('about:') || url.startsWith('data:')) {
       return true;
     }
     
+    addDebug('POPUP_NAV', 'Blocked non-http URL: ' + url.substring(0, 60));
     return false;
-  }, [extractAuthFromUrl, relayAuthToMain, closeAuthPopup]);
+  }, [extractAuthFromUrl, relayAuthToMain, closeAuthPopup, addDebug]);
 
   // Monitor auth popup URL for auth codes in regular http navigation
   const handleAuthNavChange = useCallback((navState: WebViewNavigation) => {
     const url = navState.url || '';
+    addDebug('POPUP_PAGE', 'Loaded: ' + url.substring(0, 80));
     
     const authData = extractAuthFromUrl(url);
     if (authData) {
+      addDebug('POPUP_PAGE', 'Auth data found in URL: ' + authData.substring(0, 80));
       relayAuthToMain(authData, 'https://accounts.google.com');
       setTimeout(() => closeAuthPopup(), 2000);
     }
-  }, [extractAuthFromUrl, relayAuthToMain, closeAuthPopup]);
+  }, [extractAuthFromUrl, relayAuthToMain, closeAuthPopup, addDebug]);
 
   // ============================================
   // HANDLE MESSAGES FROM WEBVIEW
@@ -910,11 +928,14 @@ export default function ColabApp() {
       
       // Main WebView requests an auth popup
       if (data.type === 'OPEN_AUTH_POPUP' && data.url) {
+        addDebug('MAIN', 'Notebook requested popup: ' + data.url.substring(0, 80));
         setAuthDebugLog([]);
+        addDebug('MAIN', 'Opening auth popup modal...');
         setAuthPopupUrl(data.url);
         setAuthPopupId(data.popupId || 0);
         setAuthParentTabId(tabId);
         setAuthPopupVisible(true);
+        setShowDebugPanel(true);
       }
       
       if (data.type === 'OPEN_URL' && data.url) {
@@ -1107,11 +1128,14 @@ export default function ColabApp() {
                 // Expo Go fallback: open in our React modal
                 const url = syntheticEvent?.nativeEvent?.targetUrl;
                 if (url) {
-                  setAuthDebugLog([]);
+                  addDebug('MAIN', 'onOpenWindow fired: ' + url.substring(0, 80));
+                  setAuthDebugLog(prev => []);
+                  addDebug('MAIN', 'Opening auth popup...');
                   setAuthPopupUrl(url);
                   setAuthPopupId(0);
                   setAuthParentTabId(tab.id);
                   setAuthPopupVisible(true);
+                  setShowDebugPanel(true);
                 }
               }}
               
@@ -1214,12 +1238,12 @@ export default function ColabApp() {
                 <Ionicons name="close" size={22} color="#fff" />
               </TouchableOpacity>
             </View>
-            {/* Debug log banner */}
+            {/* Debug log in popup header */}
             {authDebugLog.length > 0 && (
-              <View style={{backgroundColor:'#000', padding:4, maxHeight:60}}>
+              <View style={{backgroundColor:'#111', padding:4, maxHeight:80}}>
                 <ScrollView>
-                  {authDebugLog.slice(-3).map((msg, i) => (
-                    <Text key={i} style={{color:'#0f0', fontSize:9, fontFamily:'monospace'}}>{msg}</Text>
+                  {authDebugLog.slice(-5).map((msg, i) => (
+                    <Text key={i} style={{color:'#0f0', fontSize:8, fontFamily:'monospace'}}>{msg}</Text>
                   ))}
                 </ScrollView>
               </View>
@@ -1319,6 +1343,36 @@ export default function ColabApp() {
           </View>
         </View>
       </Modal>
+
+      {/* FLOATING DEBUG PANEL */}
+      {showDebugPanel && authDebugLog.length > 0 && (
+        <View style={styles.debugPanel}>
+          <View style={styles.debugHeader}>
+            <Text style={styles.debugTitle}>Auth Debug Log ({authDebugLog.length})</Text>
+            <View style={{flexDirection:'row', gap:8}}>
+              <TouchableOpacity onPress={copyDebugLog} style={styles.debugCopyBtn}>
+                <Text style={{color:'#0f0', fontSize:11, fontWeight:'700'}}>📋 COPY</Text>
+              </TouchableOpacity>
+              <TouchableOpacity onPress={() => setAuthDebugLog([])} style={styles.debugClearBtn}>
+                <Text style={{color:'#f00', fontSize:11, fontWeight:'700'}}>🗑 CLEAR</Text>
+              </TouchableOpacity>
+              <TouchableOpacity onPress={() => setShowDebugPanel(false)} style={styles.debugCloseBtn}>
+                <Ionicons name="close" size={16} color="#fff" />
+              </TouchableOpacity>
+            </View>
+          </View>
+          <ScrollView style={{maxHeight:150, padding:4}}>
+            {authDebugLog.map((msg, i) => (
+              <Text key={i} style={styles.debugLine}>{msg}</Text>
+            ))}
+          </ScrollView>
+        </View>
+      )}
+      {!showDebugPanel && authDebugLog.length > 0 && (
+        <TouchableOpacity onPress={() => setShowDebugPanel(true)} style={styles.debugMinBtn}>
+          <Text style={{color:'#0f0', fontSize:10}}>🔍 Debug ({authDebugLog.length})</Text>
+        </TouchableOpacity>
+      )}
     </View>
   );
 }
@@ -1384,4 +1438,12 @@ const styles = StyleSheet.create({
   permDoneBtn: {paddingVertical:16, borderRadius:14, alignItems:'center', marginTop:8},
   permDoneBtnText: {color:'#fff', fontSize:17, fontWeight:'700'},
   permNote: {color:'#666', fontSize:12, textAlign:'center', marginTop:12},
+  debugPanel: {position:'absolute', bottom:0, left:0, right:0, backgroundColor:'#000', borderTopWidth:1, borderTopColor:'#0f0', zIndex:9999},
+  debugHeader: {flexDirection:'row', justifyContent:'space-between', alignItems:'center', padding:6, backgroundColor:'#111'},
+  debugTitle: {color:'#0f0', fontSize:11, fontWeight:'700'},
+  debugCopyBtn: {paddingHorizontal:8, paddingVertical:3, backgroundColor:'#1a3a1a', borderRadius:4},
+  debugClearBtn: {paddingHorizontal:8, paddingVertical:3, backgroundColor:'#3a1a1a', borderRadius:4},
+  debugCloseBtn: {paddingHorizontal:4, paddingVertical:2},
+  debugLine: {color:'#0f0', fontSize:8, fontFamily:'monospace', lineHeight:12},
+  debugMinBtn: {position:'absolute', bottom:4, right:4, backgroundColor:'#000', borderWidth:1, borderColor:'#0f0', borderRadius:4, paddingHorizontal:8, paddingVertical:3, zIndex:9999},
 });
