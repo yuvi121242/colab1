@@ -324,91 +324,34 @@ export default function ColabApp() {
   }, []);
 
   // ============================================
-  // AGGRESSIVE BACKGROUND ANTI-IDLE
-  // Native-side timer that keeps ALL WebViews active
-  // Runs every 8 seconds - faster than any idle detector
+  // LIGHTWEIGHT NATIVE ANTI-IDLE
+  // Only pokes the ACTIVE tab every 45 seconds
   // ============================================
   useEffect(() => {
     if (!antiIdle || Platform.OS === 'web') return;
     
     const nativeAntiIdle = setInterval(() => {
-      tabs.forEach(tab => {
-        if (!tab.isPopup && webViewRefs.current[tab.id]) {
-          webViewRefs.current[tab.id]?.injectJavaScript(`
-            (function() {
-              // Simulate comprehensive user activity
-              var x = 200 + Math.floor(Math.random() * 400);
-              var y = 300 + Math.floor(Math.random() * 400);
-              
-              // Mouse events
-              document.dispatchEvent(new MouseEvent('mousemove', {clientX: x, clientY: y, bubbles: true}));
-              if (document.body) document.body.dispatchEvent(new MouseEvent('mousemove', {clientX: x, clientY: y, bubbles: true}));
-              
-              // Focus events
-              window.dispatchEvent(new Event('focus'));
-              document.dispatchEvent(new Event('focus'));
-              
-              // Force visibility to "visible"
-              try {
-                Object.defineProperty(document, 'hidden', { get: function() { return false; }, configurable: true });
-                Object.defineProperty(document, 'visibilityState', { get: function() { return 'visible'; }, configurable: true });
-              } catch(e) {}
-              
-              // Force online status
-              try {
-                Object.defineProperty(navigator, 'onLine', { get: function() { return true; }, configurable: true });
-              } catch(e) {}
-              window.dispatchEvent(new Event('online'));
-              
-              // === COLAB-SPECIFIC: Auto-reconnect runtime ===
-              // Click "Reconnect" button if it appears
-              var reconnectBtns = document.querySelectorAll(
-                'paper-button[id*="reconnect"], ' +
-                'button[id*="reconnect"], ' +
-                '[aria-label*="Reconnect"], ' +
-                '.reconnect-button, ' +
-                'colab-connect-button[disconnected], ' +
-                '#connect'
-              );
-              reconnectBtns.forEach(function(btn) {
-                if (btn.offsetParent !== null) { // visible
-                  btn.click();
-                  btn.dispatchEvent(new MouseEvent('click', {bubbles: true}));
-                }
-              });
-              
-              // Dismiss "Runtime disconnected" dialogs
-              var dismissBtns = document.querySelectorAll(
-                'paper-button[dialog-dismiss], ' +
-                'paper-button[dialog-confirm], ' +
-                'mwc-button[slot="primaryAction"], ' +
-                '.dismiss-button, ' +
-                'button[jsname="LgbsSe"]'
-              );
-              dismissBtns.forEach(function(btn) {
-                var text = (btn.textContent || '').toLowerCase();
-                if (text.indexOf('reconnect') !== -1 || text.indexOf('yes') !== -1 || text.indexOf('ok') !== -1 || text.indexOf('connect') !== -1) {
-                  btn.click();
-                }
-              });
-              
-              // Report alive status back to native
-              if (window.ReactNativeWebView) {
-                window.ReactNativeWebView.postMessage(JSON.stringify({
-                  type: 'ALIVE_PING',
-                  timestamp: Date.now()
-                }));
-              }
-              
-              true;
-            })();
-          `);
-        }
-      });
-    }, 8000); // Every 8 seconds - aggressive
+      // Only inject into the active tab - not all tabs
+      const ref = webViewRefs.current[activeTabId];
+      if (ref) {
+        ref.injectJavaScript(`
+          (function() {
+            var x = 200 + Math.floor(Math.random() * 400);
+            var y = 300 + Math.floor(Math.random() * 400);
+            document.dispatchEvent(new MouseEvent('mousemove', {clientX: x, clientY: y, bubbles: true}));
+            window.dispatchEvent(new Event('focus'));
+            try {
+              Object.defineProperty(document, 'hidden', { get: function() { return false; }, configurable: true });
+              Object.defineProperty(document, 'visibilityState', { get: function() { return 'visible'; }, configurable: true });
+            } catch(e) {}
+            true;
+          })();
+        `);
+      }
+    }, 45000); // Every 45 seconds - gentle
 
     return () => clearInterval(nativeAntiIdle);
-  }, [antiIdle, tabs]);
+  }, [antiIdle, activeTabId]);
 
   // ============================================
   // APP STATE - Background/Foreground handling
@@ -416,97 +359,57 @@ export default function ColabApp() {
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (nextAppState: AppStateStatus) => {
       if (nextAppState === 'background' || nextAppState === 'inactive') {
-        // Going to background - save everything
         saveState();
       }
       
       if (appState.current.match(/inactive|background/) && nextAppState === 'active') {
-        // === COMING BACK FROM BACKGROUND ===
-        // Re-activate keep awake
+        // COMING BACK FROM BACKGROUND - lightweight re-focus
         if (keepAwake && activateKeepAwakeAsync) activateKeepAwakeAsync('colab');
         
-        // Aggressively re-inject ALL scripts into ALL tabs
-        tabs.forEach(tab => {
-          if (!tab.isPopup && webViewRefs.current[tab.id]) {
-            // Step 1: Force visibility back to "visible"
-            webViewRefs.current[tab.id]?.injectJavaScript(`
+        // Only poke the ACTIVE tab with a small script
+        const ref = webViewRefs.current[activeTabId];
+        if (ref) {
+          ref.injectJavaScript(`
+            (function() {
+              try {
+                Object.defineProperty(document, 'hidden', { get: function() { return false; }, configurable: true });
+                Object.defineProperty(document, 'visibilityState', { get: function() { return 'visible'; }, configurable: true });
+              } catch(e) {}
+              window.dispatchEvent(new Event('focus'));
+              document.dispatchEvent(new Event('focus'));
+              window.dispatchEvent(new Event('online'));
+              true;
+            })();
+          `);
+          
+          // Delayed reconnect check (only once, after 2 seconds)
+          setTimeout(() => {
+            ref.injectJavaScript(`
               (function() {
-                // Re-lock visibility API
-                try {
-                  Object.defineProperty(document, 'hidden', { get: function() { return false; }, configurable: true });
-                  Object.defineProperty(document, 'visibilityState', { get: function() { return 'visible'; }, configurable: true });
-                } catch(e) {}
-                
-                // Fire focus events - make page think it regained focus
-                window.dispatchEvent(new Event('focus'));
-                document.dispatchEvent(new Event('focus'));
-                window.dispatchEvent(new FocusEvent('focus'));
-                
-                // Fire visibility change with visible state locked
-                document.dispatchEvent(new Event('visibilitychange'));
-                
-                // Force online
-                try {
-                  Object.defineProperty(navigator, 'onLine', { get: function() { return true; }, configurable: true });
-                } catch(e) {}
-                window.dispatchEvent(new Event('online'));
-                
-                // Simulate mouse activity to wake up idle detectors
-                var x = 300 + Math.floor(Math.random() * 200);
-                var y = 400 + Math.floor(Math.random() * 200);
-                document.dispatchEvent(new MouseEvent('mousemove', {clientX: x, clientY: y, bubbles: true}));
-                document.dispatchEvent(new MouseEvent('click', {clientX: x, clientY: y, bubbles: true}));
-                
-                // Keyboard activity
-                document.dispatchEvent(new KeyboardEvent('keydown', {keyCode: 16, bubbles: true}));
-                setTimeout(function() {
-                  document.dispatchEvent(new KeyboardEvent('keyup', {keyCode: 16, bubbles: true}));
-                }, 50);
-                
-                // === COLAB: Auto-reconnect if runtime disconnected ===
-                setTimeout(function() {
-                  // Look for reconnect buttons
-                  var reconnectBtns = document.querySelectorAll(
-                    'paper-button[id*="reconnect"], button[id*="reconnect"], ' +
-                    '[aria-label*="Reconnect"], colab-connect-button, #connect'
-                  );
-                  reconnectBtns.forEach(function(btn) {
-                    if (btn.offsetParent !== null) btn.click();
-                  });
-                  
-                  // Dismiss any disconnect dialogs
-                  var dialogs = document.querySelectorAll(
-                    'paper-button[dialog-dismiss], paper-button[dialog-confirm], ' +
-                    'mwc-button[slot="primaryAction"]'
-                  );
-                  dialogs.forEach(function(btn) {
-                    var text = (btn.textContent || '').toLowerCase();
-                    if (text.indexOf('reconnect') !== -1 || text.indexOf('ok') !== -1 || text.indexOf('connect') !== -1) {
-                      btn.click();
-                    }
-                  });
-                }, 500);
-                
-                // Second attempt after 2 seconds (some dialogs take time to appear)
-                setTimeout(function() {
-                  var btns = document.querySelectorAll(
-                    '[aria-label*="Reconnect"], colab-connect-button, #connect, ' +
-                    'paper-button[id*="reconnect"]'
-                  );
-                  btns.forEach(function(btn) { if (btn.offsetParent !== null) btn.click(); });
-                }, 2000);
-                
+                var btns = document.querySelectorAll(
+                  '[aria-label*="Reconnect"], colab-connect-button, #connect, ' +
+                  'paper-button[id*="reconnect"], button[id*="reconnect"]'
+                );
+                btns.forEach(function(btn) { if (btn.offsetParent !== null) btn.click(); });
+                var dialogs = document.querySelectorAll(
+                  'paper-button[dialog-dismiss], paper-button[dialog-confirm], ' +
+                  'mwc-button[slot="primaryAction"]'
+                );
+                dialogs.forEach(function(btn) {
+                  var t = (btn.textContent || '').toLowerCase();
+                  if (t.indexOf('reconnect') !== -1 || t.indexOf('ok') !== -1 || t.indexOf('connect') !== -1) btn.click();
+                });
                 true;
               })();
             `);
-          }
-        });
+          }, 2000);
+        }
       }
       
       appState.current = nextAppState;
     });
     return () => subscription.remove();
-  }, [keepAwake, antiIdle, activeTabId, tabs, saveState]);
+  }, [keepAwake, antiIdle, activeTabId, saveState]);
 
   // ============================================
   // BOOKMARKS
@@ -660,189 +563,59 @@ export default function ColabApp() {
         }
         setTimeout(checkCloseMessage, 500);
       ` : `
-        // ====== AGGRESSIVE ANTI-IDLE + BACKGROUND SURVIVAL SYSTEM ======
+        // ====== LIGHTWEIGHT ANTI-IDLE SYSTEM ======
+        // 3 consolidated timers instead of 12 to prevent UI freezing
         
         // Clear previous timers
-        if (window._aiTimers) window._aiTimers.forEach(function(t){ clearInterval(t); clearTimeout(t); });
+        if (window._aiTimers) window._aiTimers.forEach(function(t){ clearInterval(t); });
         window._aiTimers = [];
 
         if (${antiIdle}) {
-          // --- Layer 1: Mouse activity every 12-20 seconds ---
+          // --- Timer 1: Activity simulation every 30 seconds ---
           window._aiTimers.push(setInterval(function() {
             var x = 100 + Math.floor(Math.random() * (window.innerWidth - 200));
             var y = 100 + Math.floor(Math.random() * (window.innerHeight - 200));
-            ['mousemove', 'mouseover', 'mouseenter'].forEach(function(type) {
-              document.dispatchEvent(new MouseEvent(type, {clientX: x, clientY: y, bubbles: true, cancelable: true}));
-            });
-            if (document.body) document.body.dispatchEvent(new MouseEvent('mousemove', {clientX: x, clientY: y, bubbles: true}));
-          }, 12000 + Math.random() * 8000));
-
-          // --- Layer 2: Focus + visibility lock every 15 seconds ---
-          window._aiTimers.push(setInterval(function() {
+            document.dispatchEvent(new MouseEvent('mousemove', {clientX: x, clientY: y, bubbles: true}));
             window.dispatchEvent(new Event('focus'));
             document.dispatchEvent(new Event('focus'));
             try {
               Object.defineProperty(document, 'hidden', { get: function() { return false; }, configurable: true });
               Object.defineProperty(document, 'visibilityState', { get: function() { return 'visible'; }, configurable: true });
             } catch(e) {}
-          }, 15000));
-
-          // --- Layer 3: Keyboard events every 25 seconds ---
-          window._aiTimers.push(setInterval(function() {
-            var keys = [16, 17, 18, 91];
-            var key = keys[Math.floor(Math.random() * keys.length)];
-            document.dispatchEvent(new KeyboardEvent('keydown', {keyCode: key, bubbles: true}));
-            setTimeout(function() {
-              document.dispatchEvent(new KeyboardEvent('keyup', {keyCode: key, bubbles: true}));
-            }, 50 + Math.random() * 100);
-          }, 25000 + Math.random() * 10000));
-
-          // --- Layer 4: Scroll micro-movements every 40 seconds ---
-          window._aiTimers.push(setInterval(function() {
-            var scrollAmount = Math.floor(Math.random() * 6) - 3;
-            window.scrollBy({ top: scrollAmount, behavior: 'smooth' });
-            setTimeout(function() {
-              window.scrollBy({ top: -scrollAmount, behavior: 'smooth' });
-            }, 2000);
-          }, 40000 + Math.random() * 10000));
-
-          // --- Layer 5: Touch events every 20 seconds ---
-          window._aiTimers.push(setInterval(function() {
-            var x = 200 + Math.floor(Math.random() * 300);
-            var y = 300 + Math.floor(Math.random() * 400);
-            try {
-              var touch = new Touch({ identifier: 1, target: document.body, clientX: x, clientY: y });
-              document.dispatchEvent(new TouchEvent('touchstart', { touches: [touch], bubbles: true }));
-              setTimeout(function() {
-                document.dispatchEvent(new TouchEvent('touchend', { changedTouches: [touch], bubbles: true }));
-              }, 50);
-            } catch(e) {}
-          }, 20000 + Math.random() * 10000));
-
-          // --- Layer 6: Colab-specific auto-reconnect every 30 seconds ---
-          window._aiTimers.push(setInterval(function() {
-            // Click reconnect buttons
-            var reconnectBtns = document.querySelectorAll(
-              'paper-button[id*="reconnect"], button[id*="reconnect"], ' +
-              '[aria-label*="Reconnect"], colab-connect-button[disconnected], #connect'
-            );
-            reconnectBtns.forEach(function(btn) {
-              if (btn.offsetParent !== null) btn.click();
-            });
-            
-            // Click on notebook area to show activity
-            var cells = document.querySelectorAll('.cell, .codecell, .notebook-cell-list, [role="textbox"]');
-            if (cells.length > 0) {
-              var cell = cells[Math.floor(Math.random() * cells.length)];
-              cell.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
-            }
-            var colabEl = document.querySelector('#notebook-container, .notebook-content, colab-shaded-scroller');
-            if (colabEl) {
-              colabEl.dispatchEvent(new MouseEvent('mousemove', {clientX: 400, clientY: 400, bubbles: true}));
-            }
-            
-            // Dismiss disconnect/timeout dialogs
-            var dialogs = document.querySelectorAll(
-              'paper-button[dialog-dismiss], paper-button[dialog-confirm], ' +
-              'mwc-button[slot="primaryAction"], button[jsname="LgbsSe"]'
-            );
-            dialogs.forEach(function(btn) {
-              var text = (btn.textContent || '').toLowerCase();
-              if (text.indexOf('reconnect') !== -1 || text.indexOf('ok') !== -1 || 
-                  text.indexOf('connect') !== -1 || text.indexOf('yes') !== -1) {
-                btn.click();
-              }
-            });
+            window.dispatchEvent(new Event('online'));
           }, 30000));
 
-          // --- Layer 7: Lock Page Visibility API permanently ---
+          // --- Timer 2: Colab auto-reconnect every 60 seconds ---
+          window._aiTimers.push(setInterval(function() {
+            var btns = document.querySelectorAll(
+              'paper-button[id*="reconnect"], button[id*="reconnect"], ' +
+              '[aria-label*="Reconnect"], colab-connect-button, #connect, ' +
+              'paper-button[dialog-dismiss], paper-button[dialog-confirm], ' +
+              'mwc-button[slot="primaryAction"]'
+            );
+            btns.forEach(function(btn) {
+              if (btn.offsetParent !== null) {
+                var t = (btn.textContent || '').toLowerCase();
+                if (t.indexOf('reconnect') !== -1 || t.indexOf('ok') !== -1 || 
+                    t.indexOf('connect') !== -1 || t.indexOf('yes') !== -1 || btn.id) {
+                  btn.click();
+                }
+              }
+            });
+          }, 60000));
+
+          // --- Timer 3: Block visibility/blur events (one-time setup) ---
+          if (!window._eventsBlocked) {
+            window._eventsBlocked = true;
+            document.addEventListener('visibilitychange', function(e) { e.stopImmediatePropagation(); }, true);
+            window.addEventListener('blur', function(e) { e.stopImmediatePropagation(); }, true);
+          }
+
+          // Lock visibility API once
           try {
             Object.defineProperty(document, 'hidden', { get: function() { return false; }, configurable: true });
             Object.defineProperty(document, 'visibilityState', { get: function() { return 'visible'; }, configurable: true });
           } catch(e) {}
-
-          // --- Layer 8: WebSocket & network keep-alive every 20 seconds ---
-          window._aiTimers.push(setInterval(function() {
-            try {
-              Object.defineProperty(navigator, 'onLine', { get: function() { return true; }, configurable: true });
-            } catch(e) {}
-            window.dispatchEvent(new Event('online'));
-            
-            // Ping any open WebSockets to keep them alive
-            if (window._colabWs) {
-              try { window._colabWs.send(''); } catch(e) {}
-            }
-          }, 20000));
-          
-          // --- Layer 9: Intercept WebSocket to keep reference ---
-          if (!window._wsIntercepted) {
-            window._wsIntercepted = true;
-            var OrigWebSocket = window.WebSocket;
-            window.WebSocket = function(url, protocols) {
-              var ws = protocols ? new OrigWebSocket(url, protocols) : new OrigWebSocket(url);
-              // Track Colab WebSocket connections
-              if (url && (url.indexOf('colab') !== -1 || url.indexOf('kernel') !== -1 || url.indexOf('jupyter') !== -1)) {
-                window._colabWs = ws;
-                // Prevent close from server side
-                var origClose = ws.close;
-                ws.close = function(code, reason) {
-                  console.log('[AntiIdle] WebSocket close intercepted - code:', code);
-                  // Only allow intentional closes
-                  if (code === 1000 || code === undefined) {
-                    return origClose.call(ws, code, reason);
-                  }
-                  // Otherwise try to keep it open
-                  console.log('[AntiIdle] Blocking WebSocket close');
-                };
-              }
-              return ws;
-            };
-            window.WebSocket.prototype = OrigWebSocket.prototype;
-            window.WebSocket.CONNECTING = OrigWebSocket.CONNECTING;
-            window.WebSocket.OPEN = OrigWebSocket.OPEN;
-            window.WebSocket.CLOSING = OrigWebSocket.CLOSING;
-            window.WebSocket.CLOSED = OrigWebSocket.CLOSED;
-          }
-
-          // --- Layer 10: Override idle timeout detection ---
-          if (!window._idleOverrideApplied) {
-            window._idleOverrideApplied = true;
-            var origSetTimeout = window.setTimeout;
-            window.setTimeout = function(fn, delay) {
-              if (delay >= 300000) {
-                delay = Math.max(delay, 600000);
-              }
-              return origSetTimeout.apply(window, arguments);
-            };
-          }
-
-          // --- Layer 11: Heartbeat + alive report ---
-          window._aiTimers.push(setInterval(function() {
-            console.log('[AntiIdle] Heartbeat - ' + new Date().toLocaleTimeString() + ' - Active for ' + Math.round((Date.now() - (window._aiStartTime || Date.now())) / 60000) + ' min');
-            if (window.ReactNativeWebView) {
-              window.ReactNativeWebView.postMessage(JSON.stringify({
-                type: 'ALIVE_PING',
-                timestamp: Date.now()
-              }));
-            }
-          }, 60000));
-          window._aiStartTime = window._aiStartTime || Date.now();
-          
-          // --- Layer 12: Block visibilitychange & blur events ---
-          document.addEventListener('visibilitychange', function(e) {
-            e.stopImmediatePropagation();
-            e.stopPropagation();
-          }, true);
-          window.addEventListener('blur', function(e) {
-            e.stopImmediatePropagation();
-            e.stopPropagation();
-          }, true);
-          window.addEventListener('pagehide', function(e) {
-            e.stopImmediatePropagation();
-          }, true);
-          window.addEventListener('freeze', function(e) {
-            e.stopImmediatePropagation();
-          }, true);
         }
 
         // Viewport
