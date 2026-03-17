@@ -23,11 +23,13 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 let activateKeepAwakeAsync: any = null;
 let deactivateKeepAwake: any = null;
+let Audio: any = null;
 
 if (Platform.OS !== 'web') {
   const keepAwake = require('expo-keep-awake');
   activateKeepAwakeAsync = keepAwake.activateKeepAwakeAsync;
   deactivateKeepAwake = keepAwake.deactivateKeepAwake;
+  Audio = require('expo-av').Audio;
 }
 
 const APP_URL = 'https://colab.research.google.com/';
@@ -51,7 +53,7 @@ interface AppSavedState {
   bookmarks: Bookmark[];
 }
 
-// JS injected BEFORE page loads - suppresses "are you sure you want to leave" dialogs
+// JS injected BEFORE page loads - suppresses dialogs & locks visibility API
 const EARLY_INJECT_JS = `
 (function() {
   // Kill beforeunload dialogs completely
@@ -69,10 +71,42 @@ const EARLY_INJECT_JS = `
   var _origConfirm = window.confirm;
   window.confirm = function(msg) {
     if (msg && (msg.indexOf('navigate away') !== -1 || msg.indexOf('leave') !== -1 || msg.indexOf('Changes you made') !== -1)) {
-      return true; // Auto-accept navigation
+      return true;
     }
     return _origConfirm.call(window, msg);
   };
+
+  // === CRITICAL: Lock Page Visibility API BEFORE page loads ===
+  // This prevents Colab from ever knowing the page lost focus
+  try {
+    Object.defineProperty(document, 'hidden', { get: function() { return false; }, configurable: true });
+    Object.defineProperty(document, 'visibilityState', { get: function() { return 'visible'; }, configurable: true });
+  } catch(e) {}
+
+  // Block all visibilitychange events - page never knows it went to background
+  document.addEventListener('visibilitychange', function(e) {
+    e.stopImmediatePropagation();
+    e.stopPropagation();
+  }, true);
+
+  // Block blur events on window - page thinks window always has focus
+  window.addEventListener('blur', function(e) {
+    e.stopImmediatePropagation();
+    e.stopPropagation();
+  }, true);
+
+  // Block pagehide
+  window.addEventListener('pagehide', function(e) {
+    e.stopImmediatePropagation();
+    e.stopPropagation();
+  }, true);
+
+  // Block freeze event (Chrome)
+  window.addEventListener('freeze', function(e) {
+    e.stopImmediatePropagation();
+    e.stopPropagation();
+  }, true);
+
   true;
 })();
 `;
@@ -83,6 +117,10 @@ export default function ColabApp() {
   const appState = useRef(AppState.currentState);
   const stateLoaded = useRef(false);
   const saveTimeout = useRef<any>(null);
+  const soundRef = useRef<any>(null);
+  const bgTimerRef = useRef<any>(null);
+  const periodicSaveRef = useRef<any>(null);
+  const webViewAliveRef = useRef<{ [key: string]: number }>({});
   
   const [tabs, setTabs] = useState<Tab[]>([{ id: '1', url: APP_URL, title: APP_NAME }]);
   const [activeTabId, setActiveTabId] = useState('1');
@@ -100,17 +138,72 @@ export default function ColabApp() {
   const [currentUrl, setCurrentUrl] = useState(APP_URL);
   const [currentTitle, setCurrentTitle] = useState(APP_NAME);
   const [antiIdle, setAntiIdle] = useState(true);
+  const [bgActive, setBgActive] = useState(true);
 
   const statusBarHeight = Platform.OS === 'android' ? StatusBar.currentHeight || 24 : 0;
   const topPadding = Math.max(insets.top, statusBarHeight, 24);
   const bottomPadding = Math.max(insets.bottom, 10);
 
   // ============================================
+  // SILENT AUDIO - Keeps app alive in background
+  // Android won't kill a "media playing" app
+  // ============================================
+  useEffect(() => {
+    if (Platform.OS === 'web' || !Audio || !bgActive) return;
+    
+    let mounted = true;
+    const startSilentAudio = async () => {
+      try {
+        // Configure audio for background playback
+        await Audio.setAudioModeAsync({
+          allowsRecordingIOS: false,
+          staysActiveInBackground: true,
+          playsInSilentModeIOS: true,
+          shouldDuckAndroid: true,
+          playThroughEarpieceAndroid: false,
+        });
+
+        // Create a silent audio - we generate a tiny silent WAV inline
+        // Using a data URI for a minimal silent WAV file
+        const silentWavBase64 = 'UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
+        const { sound } = await Audio.Sound.createAsync(
+          { uri: `data:audio/wav;base64,${silentWavBase64}` },
+          { 
+            isLooping: true, 
+            volume: 0.01, // Nearly silent
+            shouldPlay: true,
+            isMuted: false,
+          }
+        );
+        
+        if (mounted) {
+          soundRef.current = sound;
+          await sound.playAsync();
+        } else {
+          await sound.unloadAsync();
+        }
+      } catch (e) {
+        // Silent audio failed - app may still work but background survival is reduced
+        console.log('[BG] Silent audio setup failed:', e);
+      }
+    };
+
+    startSilentAudio();
+
+    return () => {
+      mounted = false;
+      if (soundRef.current) {
+        soundRef.current.stopAsync().then(() => soundRef.current?.unloadAsync()).catch(() => {});
+        soundRef.current = null;
+      }
+    };
+  }, [bgActive]);
+
+  // ============================================
   // STATE PERSISTENCE
   // ============================================
   const saveState = useCallback(async () => {
     try {
-      // Don't save popup tabs - they're temporary
       const persistTabs = tabs.filter(t => !t.isPopup).map(t => ({...t, isPopup: undefined, parentTabId: undefined}));
       const state: AppSavedState = {
         tabs: persistTabs.length > 0 ? persistTabs : [{ id: '1', url: APP_URL, title: APP_NAME }],
@@ -129,6 +222,14 @@ export default function ColabApp() {
   }, [saveState]);
 
   useEffect(() => { debouncedSave(); }, [tabs, activeTabId, desktopMode, keepAwake, antiIdle, zoomLevel, showNavBar, bookmarks, debouncedSave]);
+
+  // Periodic state save every 10 seconds
+  useEffect(() => {
+    periodicSaveRef.current = setInterval(() => {
+      if (stateLoaded.current) saveState();
+    }, 10000);
+    return () => { if (periodicSaveRef.current) clearInterval(periodicSaveRef.current); };
+  }, [saveState]);
 
   useEffect(() => {
     const loadState = async () => {
@@ -152,27 +253,189 @@ export default function ColabApp() {
   }, []);
 
   // ============================================
-  // APP STATE - Save on background
+  // AGGRESSIVE BACKGROUND ANTI-IDLE
+  // Native-side timer that keeps ALL WebViews active
+  // Runs every 8 seconds - faster than any idle detector
+  // ============================================
+  useEffect(() => {
+    if (!antiIdle || Platform.OS === 'web') return;
+    
+    const nativeAntiIdle = setInterval(() => {
+      tabs.forEach(tab => {
+        if (!tab.isPopup && webViewRefs.current[tab.id]) {
+          webViewRefs.current[tab.id]?.injectJavaScript(`
+            (function() {
+              // Simulate comprehensive user activity
+              var x = 200 + Math.floor(Math.random() * 400);
+              var y = 300 + Math.floor(Math.random() * 400);
+              
+              // Mouse events
+              document.dispatchEvent(new MouseEvent('mousemove', {clientX: x, clientY: y, bubbles: true}));
+              if (document.body) document.body.dispatchEvent(new MouseEvent('mousemove', {clientX: x, clientY: y, bubbles: true}));
+              
+              // Focus events
+              window.dispatchEvent(new Event('focus'));
+              document.dispatchEvent(new Event('focus'));
+              
+              // Force visibility to "visible"
+              try {
+                Object.defineProperty(document, 'hidden', { get: function() { return false; }, configurable: true });
+                Object.defineProperty(document, 'visibilityState', { get: function() { return 'visible'; }, configurable: true });
+              } catch(e) {}
+              
+              // Force online status
+              try {
+                Object.defineProperty(navigator, 'onLine', { get: function() { return true; }, configurable: true });
+              } catch(e) {}
+              window.dispatchEvent(new Event('online'));
+              
+              // === COLAB-SPECIFIC: Auto-reconnect runtime ===
+              // Click "Reconnect" button if it appears
+              var reconnectBtns = document.querySelectorAll(
+                'paper-button[id*="reconnect"], ' +
+                'button[id*="reconnect"], ' +
+                '[aria-label*="Reconnect"], ' +
+                '.reconnect-button, ' +
+                'colab-connect-button[disconnected], ' +
+                '#connect'
+              );
+              reconnectBtns.forEach(function(btn) {
+                if (btn.offsetParent !== null) { // visible
+                  btn.click();
+                  btn.dispatchEvent(new MouseEvent('click', {bubbles: true}));
+                }
+              });
+              
+              // Dismiss "Runtime disconnected" dialogs
+              var dismissBtns = document.querySelectorAll(
+                'paper-button[dialog-dismiss], ' +
+                'paper-button[dialog-confirm], ' +
+                'mwc-button[slot="primaryAction"], ' +
+                '.dismiss-button, ' +
+                'button[jsname="LgbsSe"]'
+              );
+              dismissBtns.forEach(function(btn) {
+                var text = (btn.textContent || '').toLowerCase();
+                if (text.indexOf('reconnect') !== -1 || text.indexOf('yes') !== -1 || text.indexOf('ok') !== -1 || text.indexOf('connect') !== -1) {
+                  btn.click();
+                }
+              });
+              
+              // Report alive status back to native
+              if (window.ReactNativeWebView) {
+                window.ReactNativeWebView.postMessage(JSON.stringify({
+                  type: 'ALIVE_PING',
+                  timestamp: Date.now()
+                }));
+              }
+              
+              true;
+            })();
+          `);
+        }
+      });
+    }, 8000); // Every 8 seconds - aggressive
+
+    return () => clearInterval(nativeAntiIdle);
+  }, [antiIdle, tabs]);
+
+  // ============================================
+  // APP STATE - Background/Foreground handling
   // ============================================
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (nextAppState: AppStateStatus) => {
       if (nextAppState === 'background' || nextAppState === 'inactive') {
+        // Going to background - save everything
         saveState();
       }
+      
       if (appState.current.match(/inactive|background/) && nextAppState === 'active') {
+        // === COMING BACK FROM BACKGROUND ===
+        // Re-activate keep awake
         if (keepAwake && activateKeepAwakeAsync) activateKeepAwakeAsync('colab');
-        if (antiIdle && webViewRefs.current[activeTabId]) {
-          webViewRefs.current[activeTabId]?.injectJavaScript(`
-            window.dispatchEvent(new Event('focus'));
-            document.dispatchEvent(new Event('focus'));
-            true;
-          `);
-        }
+        
+        // Aggressively re-inject ALL scripts into ALL tabs
+        tabs.forEach(tab => {
+          if (!tab.isPopup && webViewRefs.current[tab.id]) {
+            // Step 1: Force visibility back to "visible"
+            webViewRefs.current[tab.id]?.injectJavaScript(`
+              (function() {
+                // Re-lock visibility API
+                try {
+                  Object.defineProperty(document, 'hidden', { get: function() { return false; }, configurable: true });
+                  Object.defineProperty(document, 'visibilityState', { get: function() { return 'visible'; }, configurable: true });
+                } catch(e) {}
+                
+                // Fire focus events - make page think it regained focus
+                window.dispatchEvent(new Event('focus'));
+                document.dispatchEvent(new Event('focus'));
+                window.dispatchEvent(new FocusEvent('focus'));
+                
+                // Fire visibility change with visible state locked
+                document.dispatchEvent(new Event('visibilitychange'));
+                
+                // Force online
+                try {
+                  Object.defineProperty(navigator, 'onLine', { get: function() { return true; }, configurable: true });
+                } catch(e) {}
+                window.dispatchEvent(new Event('online'));
+                
+                // Simulate mouse activity to wake up idle detectors
+                var x = 300 + Math.floor(Math.random() * 200);
+                var y = 400 + Math.floor(Math.random() * 200);
+                document.dispatchEvent(new MouseEvent('mousemove', {clientX: x, clientY: y, bubbles: true}));
+                document.dispatchEvent(new MouseEvent('click', {clientX: x, clientY: y, bubbles: true}));
+                
+                // Keyboard activity
+                document.dispatchEvent(new KeyboardEvent('keydown', {keyCode: 16, bubbles: true}));
+                setTimeout(function() {
+                  document.dispatchEvent(new KeyboardEvent('keyup', {keyCode: 16, bubbles: true}));
+                }, 50);
+                
+                // === COLAB: Auto-reconnect if runtime disconnected ===
+                setTimeout(function() {
+                  // Look for reconnect buttons
+                  var reconnectBtns = document.querySelectorAll(
+                    'paper-button[id*="reconnect"], button[id*="reconnect"], ' +
+                    '[aria-label*="Reconnect"], colab-connect-button, #connect'
+                  );
+                  reconnectBtns.forEach(function(btn) {
+                    if (btn.offsetParent !== null) btn.click();
+                  });
+                  
+                  // Dismiss any disconnect dialogs
+                  var dialogs = document.querySelectorAll(
+                    'paper-button[dialog-dismiss], paper-button[dialog-confirm], ' +
+                    'mwc-button[slot="primaryAction"]'
+                  );
+                  dialogs.forEach(function(btn) {
+                    var text = (btn.textContent || '').toLowerCase();
+                    if (text.indexOf('reconnect') !== -1 || text.indexOf('ok') !== -1 || text.indexOf('connect') !== -1) {
+                      btn.click();
+                    }
+                  });
+                }, 500);
+                
+                // Second attempt after 2 seconds (some dialogs take time to appear)
+                setTimeout(function() {
+                  var btns = document.querySelectorAll(
+                    '[aria-label*="Reconnect"], colab-connect-button, #connect, ' +
+                    'paper-button[id*="reconnect"]'
+                  );
+                  btns.forEach(function(btn) { if (btn.offsetParent !== null) btn.click(); });
+                }, 2000);
+                
+                true;
+              })();
+            `);
+          }
+        });
       }
+      
       appState.current = nextAppState;
     });
     return () => subscription.remove();
-  }, [keepAwake, antiIdle, activeTabId, saveState]);
+  }, [keepAwake, antiIdle, activeTabId, tabs, saveState]);
 
   // ============================================
   // BOOKMARKS
@@ -196,42 +459,11 @@ export default function ColabApp() {
   }, [keepAwake]);
 
   // ============================================
-  // NATIVE-SIDE ANTI-IDLE: Re-inject activity into ALL tabs periodically
-  // This ensures even if JS timers get killed, activity continues
-  // ============================================
-  useEffect(() => {
-    if (!antiIdle || Platform.OS === 'web') return;
-    const nativeAntiIdle = setInterval(() => {
-      // Inject activity into ALL non-popup tabs (keeps them all alive)
-      tabs.forEach(tab => {
-        if (!tab.isPopup && webViewRefs.current[tab.id]) {
-          webViewRefs.current[tab.id]?.injectJavaScript(`
-            (function() {
-              var x = 200 + Math.floor(Math.random() * 400);
-              var y = 300 + Math.floor(Math.random() * 400);
-              document.dispatchEvent(new MouseEvent('mousemove', {clientX: x, clientY: y, bubbles: true}));
-              window.dispatchEvent(new Event('focus'));
-              document.dispatchEvent(new Event('focus'));
-              try {
-                Object.defineProperty(document, 'hidden', { get: function() { return false; }, configurable: true });
-                Object.defineProperty(document, 'visibilityState', { get: function() { return 'visible'; }, configurable: true });
-              } catch(e) {}
-              true;
-            })();
-          `);
-        }
-      });
-    }, 20000); // Every 20 seconds from native side
-    return () => clearInterval(nativeAntiIdle);
-  }, [antiIdle, tabs]);
-
-  // ============================================
   // BACK BUTTON HANDLER
   // ============================================
   useEffect(() => {
     if (Platform.OS !== 'android') return;
     const handler = BackHandler.addEventListener('hardwareBackPress', () => {
-      // If on a popup tab, close it and go back to parent
       const activeTab = tabs.find(t => t.id === activeTabId);
       if (activeTab?.isPopup && activeTab?.parentTabId) {
         closePopupTab(activeTabId, activeTab.parentTabId);
@@ -259,7 +491,6 @@ export default function ColabApp() {
     setTabs(newTabs);
   };
 
-  // Close a popup tab and return to parent
   const closePopupTab = useCallback((popupId: string, parentId: string) => {
     setTabs(prev => prev.filter(t => t.id !== popupId));
     setActiveTabId(parentId);
@@ -309,12 +540,10 @@ export default function ColabApp() {
 
   // ============================================
   // HANDLE POPUP WINDOWS (OAuth, Google Drive mount)
-  // Opens in a NEW in-app tab, preserving the original Colab page
   // ============================================
   const handleOpenWindow = useCallback((syntheticEvent: any) => {
     const url = syntheticEvent?.nativeEvent?.targetUrl;
     if (url) {
-      // Create a new popup tab for OAuth
       const popupTab: Tab = {
         id: 'popup_' + Date.now().toString(),
         url: url,
@@ -328,7 +557,7 @@ export default function ColabApp() {
   }, [activeTabId]);
 
   // ============================================
-  // INJECTED JAVASCRIPT - Aggressive anti-idle for hours of use
+  // INJECTED JAVASCRIPT - Full anti-idle + background survival
   // ============================================
   const getInjectedScript = (isPopup: boolean = false) => `
     (function() {
@@ -360,59 +589,53 @@ export default function ColabApp() {
         }
         setTimeout(checkCloseMessage, 500);
       ` : `
-        // ====== AGGRESSIVE ANTI-IDLE SYSTEM ======
-        // Keeps Colab alive for hours by simulating real user activity
+        // ====== AGGRESSIVE ANTI-IDLE + BACKGROUND SURVIVAL SYSTEM ======
         
-        // Clear any previous timers
+        // Clear previous timers
         if (window._aiTimers) window._aiTimers.forEach(function(t){ clearInterval(t); clearTimeout(t); });
         window._aiTimers = [];
 
         if (${antiIdle}) {
-          // --- Layer 1: Mouse activity every 15-25 seconds ---
+          // --- Layer 1: Mouse activity every 12-20 seconds ---
           window._aiTimers.push(setInterval(function() {
             var x = 100 + Math.floor(Math.random() * (window.innerWidth - 200));
             var y = 100 + Math.floor(Math.random() * (window.innerHeight - 200));
-            var events = ['mousemove', 'mouseover', 'mouseenter'];
-            events.forEach(function(type) {
+            ['mousemove', 'mouseover', 'mouseenter'].forEach(function(type) {
               document.dispatchEvent(new MouseEvent(type, {clientX: x, clientY: y, bubbles: true, cancelable: true}));
             });
-            // Also dispatch on body and document element
             if (document.body) document.body.dispatchEvent(new MouseEvent('mousemove', {clientX: x, clientY: y, bubbles: true}));
-          }, 15000 + Math.random() * 10000));
+          }, 12000 + Math.random() * 8000));
 
-          // --- Layer 2: Focus + visibility every 20 seconds ---
+          // --- Layer 2: Focus + visibility lock every 15 seconds ---
           window._aiTimers.push(setInterval(function() {
             window.dispatchEvent(new Event('focus'));
             document.dispatchEvent(new Event('focus'));
-            document.dispatchEvent(new Event('visibilitychange'));
-            // Fake document.hidden = false
             try {
-              Object.defineProperty(document, 'hidden', { value: false, writable: true, configurable: true });
-              Object.defineProperty(document, 'visibilityState', { value: 'visible', writable: true, configurable: true });
+              Object.defineProperty(document, 'hidden', { get: function() { return false; }, configurable: true });
+              Object.defineProperty(document, 'visibilityState', { get: function() { return 'visible'; }, configurable: true });
             } catch(e) {}
-          }, 20000));
+          }, 15000));
 
-          // --- Layer 3: Keyboard events every 30 seconds ---
+          // --- Layer 3: Keyboard events every 25 seconds ---
           window._aiTimers.push(setInterval(function() {
-            var keys = [16, 17, 18, 91]; // Shift, Ctrl, Alt, Meta (harmless)
+            var keys = [16, 17, 18, 91];
             var key = keys[Math.floor(Math.random() * keys.length)];
             document.dispatchEvent(new KeyboardEvent('keydown', {keyCode: key, bubbles: true}));
             setTimeout(function() {
               document.dispatchEvent(new KeyboardEvent('keyup', {keyCode: key, bubbles: true}));
             }, 50 + Math.random() * 100);
-          }, 30000 + Math.random() * 10000));
+          }, 25000 + Math.random() * 10000));
 
-          // --- Layer 4: Scroll micro-movements every 45 seconds ---
+          // --- Layer 4: Scroll micro-movements every 40 seconds ---
           window._aiTimers.push(setInterval(function() {
-            var scrollAmount = Math.floor(Math.random() * 6) - 3; // -3 to +3 pixels
+            var scrollAmount = Math.floor(Math.random() * 6) - 3;
             window.scrollBy({ top: scrollAmount, behavior: 'smooth' });
-            // Scroll back after a moment to stay in place
             setTimeout(function() {
               window.scrollBy({ top: -scrollAmount, behavior: 'smooth' });
             }, 2000);
-          }, 45000 + Math.random() * 15000));
+          }, 40000 + Math.random() * 10000));
 
-          // --- Layer 5: Touch events every 25 seconds (for mobile detection) ---
+          // --- Layer 5: Touch events every 20 seconds ---
           window._aiTimers.push(setInterval(function() {
             var x = 200 + Math.floor(Math.random() * 300);
             var y = 300 + Math.floor(Math.random() * 400);
@@ -423,61 +646,132 @@ export default function ColabApp() {
                 document.dispatchEvent(new TouchEvent('touchend', { changedTouches: [touch], bubbles: true }));
               }, 50);
             } catch(e) {}
-          }, 25000 + Math.random() * 10000));
+          }, 20000 + Math.random() * 10000));
 
-          // --- Layer 6: Colab-specific - Click on notebook area every 60 seconds ---
+          // --- Layer 6: Colab-specific auto-reconnect every 30 seconds ---
           window._aiTimers.push(setInterval(function() {
-            // Try to click on the notebook content area (not buttons)
+            // Click reconnect buttons
+            var reconnectBtns = document.querySelectorAll(
+              'paper-button[id*="reconnect"], button[id*="reconnect"], ' +
+              '[aria-label*="Reconnect"], colab-connect-button[disconnected], #connect'
+            );
+            reconnectBtns.forEach(function(btn) {
+              if (btn.offsetParent !== null) btn.click();
+            });
+            
+            // Click on notebook area to show activity
             var cells = document.querySelectorAll('.cell, .codecell, .notebook-cell-list, [role="textbox"]');
             if (cells.length > 0) {
               var cell = cells[Math.floor(Math.random() * cells.length)];
               cell.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
             }
-            // Also try to interact with colab's own elements
             var colabEl = document.querySelector('#notebook-container, .notebook-content, colab-shaded-scroller');
             if (colabEl) {
               colabEl.dispatchEvent(new MouseEvent('mousemove', {clientX: 400, clientY: 400, bubbles: true}));
             }
-          }, 60000 + Math.random() * 15000));
+            
+            // Dismiss disconnect/timeout dialogs
+            var dialogs = document.querySelectorAll(
+              'paper-button[dialog-dismiss], paper-button[dialog-confirm], ' +
+              'mwc-button[slot="primaryAction"], button[jsname="LgbsSe"]'
+            );
+            dialogs.forEach(function(btn) {
+              var text = (btn.textContent || '').toLowerCase();
+              if (text.indexOf('reconnect') !== -1 || text.indexOf('ok') !== -1 || 
+                  text.indexOf('connect') !== -1 || text.indexOf('yes') !== -1) {
+                btn.click();
+              }
+            });
+          }, 30000));
 
-          // --- Layer 7: Override Colab's idle detection ---
-          // Colab uses document.hidden and visibilityState to detect idle
+          // --- Layer 7: Lock Page Visibility API permanently ---
           try {
             Object.defineProperty(document, 'hidden', { get: function() { return false; }, configurable: true });
             Object.defineProperty(document, 'visibilityState', { get: function() { return 'visible'; }, configurable: true });
           } catch(e) {}
 
-          // --- Layer 8: Keep WebSocket connections alive ---
+          // --- Layer 8: WebSocket & network keep-alive every 20 seconds ---
           window._aiTimers.push(setInterval(function() {
-            // Prevent Colab from thinking connection is lost
-            if (navigator.onLine !== undefined) {
-              try {
-                Object.defineProperty(navigator, 'onLine', { get: function() { return true; }, configurable: true });
-              } catch(e) {}
-            }
-            // Dispatch online event
+            try {
+              Object.defineProperty(navigator, 'onLine', { get: function() { return true; }, configurable: true });
+            } catch(e) {}
             window.dispatchEvent(new Event('online'));
-          }, 30000));
+            
+            // Ping any open WebSockets to keep them alive
+            if (window._colabWs) {
+              try { window._colabWs.send(''); } catch(e) {}
+            }
+          }, 20000));
+          
+          // --- Layer 9: Intercept WebSocket to keep reference ---
+          if (!window._wsIntercepted) {
+            window._wsIntercepted = true;
+            var OrigWebSocket = window.WebSocket;
+            window.WebSocket = function(url, protocols) {
+              var ws = protocols ? new OrigWebSocket(url, protocols) : new OrigWebSocket(url);
+              // Track Colab WebSocket connections
+              if (url && (url.indexOf('colab') !== -1 || url.indexOf('kernel') !== -1 || url.indexOf('jupyter') !== -1)) {
+                window._colabWs = ws;
+                // Prevent close from server side
+                var origClose = ws.close;
+                ws.close = function(code, reason) {
+                  console.log('[AntiIdle] WebSocket close intercepted - code:', code);
+                  // Only allow intentional closes
+                  if (code === 1000 || code === undefined) {
+                    return origClose.call(ws, code, reason);
+                  }
+                  // Otherwise try to keep it open
+                  console.log('[AntiIdle] Blocking WebSocket close');
+                };
+              }
+              return ws;
+            };
+            window.WebSocket.prototype = OrigWebSocket.prototype;
+            window.WebSocket.CONNECTING = OrigWebSocket.CONNECTING;
+            window.WebSocket.OPEN = OrigWebSocket.OPEN;
+            window.WebSocket.CLOSING = OrigWebSocket.CLOSING;
+            window.WebSocket.CLOSED = OrigWebSocket.CLOSED;
+          }
 
-          // --- Layer 9: Override setTimeout/setInterval idle detectors ---
-          // Some sites use long setTimeout to detect idle - we intercept and reset them
+          // --- Layer 10: Override idle timeout detection ---
           if (!window._idleOverrideApplied) {
             window._idleOverrideApplied = true;
             var origSetTimeout = window.setTimeout;
             window.setTimeout = function(fn, delay) {
-              // If it looks like an idle timeout (>= 5 minutes), reduce it
               if (delay >= 300000) {
-                delay = Math.max(delay, 600000); // Let it run but we'll keep faking activity
+                delay = Math.max(delay, 600000);
               }
               return origSetTimeout.apply(window, arguments);
             };
           }
 
-          // --- Layer 10: Heartbeat logger ---
+          // --- Layer 11: Heartbeat + alive report ---
           window._aiTimers.push(setInterval(function() {
             console.log('[AntiIdle] Heartbeat - ' + new Date().toLocaleTimeString() + ' - Active for ' + Math.round((Date.now() - (window._aiStartTime || Date.now())) / 60000) + ' min');
-          }, 120000));
+            if (window.ReactNativeWebView) {
+              window.ReactNativeWebView.postMessage(JSON.stringify({
+                type: 'ALIVE_PING',
+                timestamp: Date.now()
+              }));
+            }
+          }, 60000));
           window._aiStartTime = window._aiStartTime || Date.now();
+          
+          // --- Layer 12: Block visibilitychange & blur events ---
+          document.addEventListener('visibilitychange', function(e) {
+            e.stopImmediatePropagation();
+            e.stopPropagation();
+          }, true);
+          window.addEventListener('blur', function(e) {
+            e.stopImmediatePropagation();
+            e.stopPropagation();
+          }, true);
+          window.addEventListener('pagehide', function(e) {
+            e.stopImmediatePropagation();
+          }, true);
+          window.addEventListener('freeze', function(e) {
+            e.stopImmediatePropagation();
+          }, true);
         }
 
         // Viewport
@@ -500,17 +794,37 @@ export default function ColabApp() {
     try {
       const data = JSON.parse(event.nativeEvent.data);
       if (data.type === 'CLOSE_POPUP') {
-        // OAuth complete - close popup tab and go back to parent
         const tab = tabs.find(t => t.id === tabId);
         if (tab?.isPopup && tab?.parentTabId) {
           closePopupTab(tabId, tab.parentTabId);
         }
+      }
+      if (data.type === 'ALIVE_PING') {
+        // Track that this WebView is alive
+        webViewAliveRef.current[tabId] = data.timestamp;
       }
       if (data.type === 'OPEN_URL' && data.url) {
         webViewRefs.current[activeTabId]?.injectJavaScript(`window.location.href='${data.url}';true;`);
       }
     } catch (e) {}
   }, [activeTabId, tabs, closePopupTab]);
+
+  // ============================================
+  // WEBVIEW PROCESS DEATH HANDLER
+  // If Android kills a WebView process, detect & reload
+  // ============================================
+  const handleRenderProcessGone = useCallback((tabId: string) => {
+    const tab = tabs.find(t => t.id === tabId);
+    if (tab && !tab.isPopup) {
+      // WebView process was killed - reload from saved URL
+      webViewRefs.current[tabId]?.reload();
+    }
+  }, [tabs]);
+
+  const handleContentProcessDidTerminate = useCallback((tabId: string) => {
+    // iOS equivalent - WebView content process terminated
+    webViewRefs.current[tabId]?.reload();
+  }, []);
 
   // ============================================
   // WEB FALLBACK
@@ -544,6 +858,9 @@ export default function ColabApp() {
           <Text style={styles.headerTitle}>{APP_NAME}</Text>
         </View>
         <View style={styles.headerRight}>
+          <TouchableOpacity style={styles.hBtn} onPress={() => setBgActive(!bgActive)}>
+            <Ionicons name={bgActive ? "moon" : "moon-outline"} size={20} color={bgActive ? "#4CAF50" : "#888"} />
+          </TouchableOpacity>
           <TouchableOpacity style={styles.hBtn} onPress={() => setAntiIdle(!antiIdle)}>
             <Ionicons name={antiIdle ? "shield-checkmark" : "shield-outline"} size={20} color={antiIdle ? "#4CAF50" : "#888"} />
           </TouchableOpacity>
@@ -579,7 +896,7 @@ export default function ColabApp() {
 
       {isLoading && <View style={styles.progressBar}><View style={[styles.progressFill, {width: `${progress*100}%`, backgroundColor: APP_COLOR}]} /></View>}
 
-      {/* WEBVIEW - All tabs rendered but only active one visible */}
+      {/* WEBVIEW - All tabs rendered, only active one visible */}
       <View style={styles.webViewContainer}>
         {tabs.map(tab => (
           <View key={tab.id} style={[styles.webViewWrap, {display: tab.id === activeTabId ? 'flex' : 'none'}]}>
@@ -600,7 +917,6 @@ export default function ColabApp() {
               onLoadEnd={() => tab.id === activeTabId && setIsLoading(false)}
               onLoadProgress={({nativeEvent}) => tab.id === activeTabId && setProgress(nativeEvent.progress)}
               
-              // CRITICAL: Allow popups for OAuth but handle them as in-app tabs
               setSupportMultipleWindows={true}
               onOpenWindow={handleOpenWindow}
               
@@ -608,7 +924,6 @@ export default function ColabApp() {
               onShouldStartLoadWithRequest={handleShouldStartLoad}
               onMessage={(e) => handleMessage(e, tab.id)}
               
-              // Suppress "are you sure you want to leave" BEFORE page loads
               injectedJavaScriptBeforeContentLoaded={EARLY_INJECT_JS}
               injectedJavaScript={getInjectedScript(!!tab.isPopup)}
               
@@ -627,6 +942,10 @@ export default function ColabApp() {
               allowUniversalAccessFromFileURLs={true}
               mediaPlaybackRequiresUserAction={false}
               androidLayerType="hardware"
+              
+              // Detect WebView process death
+              onRenderProcessGone={() => handleRenderProcessGone(tab.id)}
+              onContentProcessDidTerminate={() => handleContentProcessDidTerminate(tab.id)}
               
               renderLoading={() => (
                 <View style={styles.loading}>

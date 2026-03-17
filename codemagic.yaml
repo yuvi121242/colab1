@@ -48,7 +48,7 @@ workflows:
       - name: Install and fix versions
         script: |
           npm install
-          npx expo install expo-font expo-system-ui expo-build-properties
+          npx expo install expo-font expo-system-ui expo-build-properties expo-av
           npx expo install --fix
 
       - name: Patch expo-modules-core kotlin version in node_modules
@@ -160,7 +160,7 @@ workflows:
       - name: Install and fix versions
         script: |
           npm install
-          npx expo install expo-font expo-system-ui expo-build-properties
+          npx expo install expo-font expo-system-ui expo-build-properties expo-av
           npx expo install --fix
 
       - name: Patch expo-modules-core kotlin version in node_modules
